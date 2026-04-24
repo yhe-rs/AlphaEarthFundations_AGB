@@ -40,7 +40,6 @@ print(f"Used Disk Space: {disk_info.used} bytes")
 print(f"Free Disk Space: {disk_info.free} bytes")
 print(f"Disk Space Utilization: {disk_info.percent}%")
 
-
 try:
     gpus = GPUtil.getGPUs()
 
@@ -61,7 +60,6 @@ try:
 except Exception:
     print("\nNo GPU detected or NVIDIA driver unavailable.")
 
-
 from eBoruta import eBoruta
 import geopandas as gpd
 import pandas as pd
@@ -73,6 +71,7 @@ import tqdm as tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 from IPython.display import display, HTML
+import sklearn
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import cross_val_score, train_test_split
@@ -82,6 +81,7 @@ import plotly.io as pio
 import shap
 import datetime
 import math
+import joblib
 
 from plotly.io import show
 from optuna.importance import get_param_importances, MeanDecreaseImpurityImportanceEvaluator
@@ -90,39 +90,34 @@ from datetime import datetime
 # pd.set_option("display.max_colwidth", 100)
 
 print("\n******Current working dir", os.getcwd())
-import torch
+
 import optuna
 # import optunahub
 
-import xgboost as xgb
-from xgboost import XGBRegressor, XGBClassifier
-# from xgboost import dask as dxgb
-# from xgboost.dask import DaskDMatrix
-# from xgboost.dask import DaskQuantileDMatrix
-
-print('xgb=:',xgb.__version__)
+print('sklearn=:',sklearn.__version__)
 print('optuna=:',optuna.__version__)
 # print('optunahub=:',optunahub.__version__)
 
 # load and preprocess data
-def prepare_DMatrix_array(csv_path, cols, dataset, save_dir, cover_type=None):
+def prepare_df(csv_path, cols, dataset, save_dir, cover_type=None):
     """
-    Load data from a CSV file, preprocess it, and convert it into a DMatrix format for XGBoost.
+    Load data from a CSV file, preprocess it, and convert it into a df for rf.
 
     Parameters:
     - csv_path: Path to the CSV file.
-    - col: List of column names for features.
+    - cols: List of column names for features.
+    - dataset: train / validation / test
     - save_dir: Directory path to save preprocessed data.
+    - cover_type: landcover type to filter (optional)
 
     Returns:
-    - X_train: DataFrame of features.
-    - y_train: Series of target variable.
-    - dtrain: DMatrix for XGBoost.
+    - X: DataFrame of features.
+    - y: Series of target variable.
     """
-    
+
     # Load the data
     df = pd.read_csv(csv_path)
-    
+
     # Filter by land cover if specified
     if cover_type is not None:
         df = df[df["Cover"] == cover_type]
@@ -130,31 +125,29 @@ def prepare_DMatrix_array(csv_path, cols, dataset, save_dir, cover_type=None):
     else:
         print("Using all land cover types")
 
-    # Separate features and target variable for training and testing
+    # Select features and target
     X = df[cols]
     y = df["AGBD"]
-    
-    print(f"\nTotal {dataset} samples=:", len(X))
-    
-    # Converting the datasets into DMatrix format for XGBoost
-    dMatrix = xgb.DMatrix(X, label=y)
 
-    print("\nxgb.DMatrix transition successfully!")
+    print(f"\nTotal {dataset} samples:", len(X))
+
+    print("\nRF dataframe prepared successfully!")
+
     with open(f"{save_dir}_used_features.txt", "w") as file:
-         file.write(f"used features: \n{cols}")
-        
-    return X, y, dMatrix
+        file.write(f"used features:\n{cols}")
 
+    return X, y
 
 
 
 # plot hist of target via in training dataset
 def plot_target_histograms(y_train, dataset, save_dir):
     """
-    Plot a histogram of the target variable in the training dataset and save it as an image file.
+    Plot a histogram of the target variable and save it as an image file.
 
     Parameters:
     - y_train: Series of target variable.
+    - dataset: cha: type in train, vallidation, test  
     - save_dir: Directory path to save the plot.
 
     Returns:
@@ -183,6 +176,7 @@ def plot_target_histograms(y_train, dataset, save_dir):
     plt.close()
 
     print(f"\n⚡ Histogram of {dataset} set saved successfully!")
+   
     return
 
 
@@ -192,74 +186,48 @@ def plot_target_histograms(y_train, dataset, save_dir):
 def objective(trial, save_dir):
 
     """
-    Perform hyperparameter tuning for an XGBoost model using Optuna.
+    Perform hyperparameter tuning for an rf model using Optuna.
 
     Parameters:
     - trial: Optuna trial object.
     - save_dir: Directory path to save results.
 
     Returns:
-    - The mean RMSE of the best model.
+    - The RMSE of the best model.
     """
     
     param = {# paras
-        'objective': 'reg:squarederror',
-        'eval_metric': 'rmse',
-        'tree_method' : "hist", 
-        'device' : "cpu",
-        'booster': "gbtree",
-        'seed': 42, 
-        # 'booster': trial.suggest_categorical("booster", ["dart"]),
-        
-        # 'learning_rate': 0.291,
-        'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.3, step=0.001, log=False), #range: [0,1]
-        'gamma': trial.suggest_float('gamma',0, 20, step=0.01, log=False), #range:  [0, ]
-        'max_depth': trial.suggest_int('max_depth', 3, 30), #range:  [0, ]
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 20), #range:  [0, ]
-        'subsample': trial.suggest_float('subsample', 0.4, 1.0,  step=0.001, log=False), #range:  (0,1]
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.4, 1.0,  step=0.001, log=False),#range:   (0, 1]
-        'reg_lambda': trial.suggest_float('reg_lambda', 0, 30, log=False,step=0.001),  # L2 regularization range: [0, ]
-        'reg_alpha': trial.suggest_float('reg_alpha', 0, 30, log=False,step=0.001),     # L1 regularization range: [0, ]
+        'n_estimators': trial.suggest_int('n_estimators', 100, 2000, step=50),
+        'max_depth': trial.suggest_int('max_depth', 3, 50),
+        'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+        'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20),
+        'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', 1.0]),
+        'criterion': trial.suggest_categorical('criterion', ["squared_error"]),
+        'random_state': 42, 
+        'n_jobs': -1 # Use all CPU cores for faster training
     }
-    
-
-    if param["booster"] == "dart":
-        # param["sample_type"] = trial.suggest_categorical("sample_type", ["uniform", "weighted"])
-        # param["normalize_type"] = trial.suggest_categorical("normalize_type", ["tree", "forest"])
-        param["rate_drop"] = 0.5#trial.suggest_float("rate_drop", 1e-8, 1.0, log=False)
-        param["skip_drop"] = 0.5#trial.suggest_float("skip_drop", 1e-8, 1.0, log=False)
-
-
-    # evals_result = {}
-    pruning_callback = optuna.integration.XGBoostPruningCallback(trial, 'valid-rmse')        
+     
     # train
-    results = xgb.train(
-        params=param,
-        dtrain=dtrain,
-        num_boost_round=2000,
-        evals=[(dtrain, 'train'), (dval, 'valid')],
-        early_stopping_rounds=100,
-        verbose_eval=0, # change to 2 to view train-rmse valid-rmse per boost round,  printed every 2 boosting stages
-        callbacks=[pruning_callback],
-        # evals_result=evals_result 
-    )
-    # print(evals_result)
-        
-    trial.set_user_attr('best_iteration', results.best_iteration)
+    model = RandomForestRegressor(**param)
+    model.fit(X_train, y_train)
 
-    # print the best round per trial
-    print(f"⚠️ Trial {trial.number} completed at index: {results.best_iteration}\n")
-    return results.best_score
+    # validation 
+    y_pred = model.predict(X_val)
+    score = root_mean_squared_error(y_val, y_pred)
+
+    # print trial progress
+    print(f"⚠️ Trial {trial.number} completed!\n")
+    return score
 
 
 
-def get_best_trial_metrics(study, dtrain, save_dir):
+def get_best_trial_metrics(study, X_train, y_train, X_val, y_val, save_dir):
     """
     Evaluate the best trial from an Optuna study and calculate its metric
 
     Parameters:
     - study: Optuna study object.
-    - dtrain: XGBoost DMatrix for training.
+    - X_train, y_train, X_val, y_val: train and val dataset
     - save_dir: Directory path to save results.
 
     Returns:
@@ -267,74 +235,45 @@ def get_best_trial_metrics(study, dtrain, save_dir):
     """
 
     param = study.best_trial.params.copy()
-    param['seed'] = 42
-    best_iteration = study.best_trial.user_attrs['best_iteration']
-    print(f"⚠️  best_iteration (index) is:{best_iteration}")
+    param['random_state'] = 42
+    param['n_jobs'] = -1
 
-    # Make sure *rmse* is the official eval metric – do NOT add `r2`
-    eval_metric = param.get("eval_metric", [])
-    if isinstance(eval_metric, str):
-        eval_metric = [eval_metric]
-    if "rmse" not in eval_metric:
-        eval_metric.append("rmse")
-    # IMPORTANT: do **not** append "r2" – it is unknown in this build
-    param["eval_metric"] = eval_metric
+    # use best parameters to retrain the model
+    model = RandomForestRegressor(**param)
+    model.fit(X_train,y_train)
 
-
-    def r2_eval(preds, dmat):
-        y_true = dmat.get_label()
-        ss_res = np.sum((y_true - preds) ** 2)
-        ss_tot = np.sum((y_true - y_true.mean()) ** 2)
-        r2 = 1.0 - ss_res / ss_tot
-        return "r2", r2     # (name, value)
-
-    # empty dictionary to store the results# 
-    evals_result = {}
-    results = xgb.train(
-        params=param,
-        dtrain=dtrain,
-        num_boost_round=best_iteration+1,
-        evals=[(dtrain, 'train'), (dval, 'valid')],
-        custom_metric=r2_eval,           # <- custom metric
-        evals_result=evals_result,
-        verbose_eval=10, # change to 2 to view train-rmse valid-rmse per boost round,  printed every 2 boosting stages
-    )
-
-    # print(evals_result)
-    # Prepare the data for the DataFrame by extracting the lists
-    train_rmse_history = evals_result['train']['rmse']
-    valid_rmse_history = evals_result['valid']['rmse']
-    train_r2_history = evals_result['train']['r2']
-    valid_r2_history = evals_result['valid']['r2']
+    # compute r2 and rmse of train set
+    y_train_pred = model.predict(X_train)
+    train_rmse = root_mean_squared_error(y_train, y_train_pred)
+    train_r2 = r2_score(y_train, y_train_pred)
+    
+    # compute r2 and rmse of validation set
+    y_val_pred = model.predict(X_val)
+    val_rmse = root_mean_squared_error(y_val, y_val_pred)
+    val_r2 = r2_score(y_val, y_val_pred)
     
     # Create and save the DataFrame...
     df = pd.DataFrame({
-        'boosting_round': range(1, len(train_rmse_history) + 1),
-        'train_rmse': train_rmse_history,
-        'valid_rmse': valid_rmse_history,
-        'train_r2': train_r2_history,
-        'valid_r2': valid_r2_history
+        'train_rmse': [train_rmse],
+        'valid_rmse': [val_rmse],
+        'train_r2': [train_r2],
+        'valid_r2': [val_r2]
     })
+    print(df)
     csv_path = os.path.join(save_dir, 'best_trial_train_val_metrics.csv')
     df.to_csv(csv_path, index=False)
     print(f"Exported training metrics to {csv_path}") # Changed message to be more accurate
+    #
+    print(f"\nFinal Validation Metrics: RMSE={val_rmse:.4f}, R2={val_r2:.4f}")
     
-    # --- THE FIX IS HERE ---
-    # Get the final score from the end of the history list
-    best_rmse = valid_rmse_history[-1]
-    best_r2   = valid_r2_history[-1]
-    
-    # Also, your print statement is misleading since this is not CV
-    print(f"\nFinal Validation Metrics: RMSE={best_rmse:.4f}, R2={best_r2:.4f}")
-    
-    return {"rmse": best_rmse, "r2": best_r2}
+    return {"rmse": val_rmse, "r2": val_r2}
 
     
 
 # export trained model and the best paras
 def save_best_results_and_train_model(study, X_train, y_train, save_dir):
     """
-    Print the best hyperparameters and score, save results to a text file, and train the final XGBoost model.
+    Print the best hyperparameters and score, save results to a text file, and train the final rf model.
 
     Parameters:
     study: Optuna study object containing the results of hyperparameter optimization
@@ -343,44 +282,35 @@ def save_best_results_and_train_model(study, X_train, y_train, save_dir):
     save_dir (str): Directory to save output files
 
     Returns:
-    The trained XGBoost model
+    The trained rf model
     """
     
     # Print the best hyperparameters and the best score
     print("\nBest trial number:", study.best_trial.number)
     print("Best hyperparameters:", study.best_params)
-    print("Best num_boost_round:", study.best_trial.user_attrs['best_iteration']+1)
     print("Best RMSE:", study.best_value)
-    print("XGB training time:", used_time)
+    print("rf training time:", used_time)
 
     # Save the best results to a txt file
     with open(f"{save_dir}_best_para_result.txt", "w") as file:
         file.write(f"Best trial number: {study.best_trial.number}\n")
         file.write(f"Best hyperparameters: {study.best_params}\n")
-        file.write(f"Best num_boost_round: {study.best_trial.user_attrs['best_iteration']+1}\n")
         file.write(f"Best RMSE: {study.best_value}\n")
-        file.write(f"XGB training time: {used_time}")
+        file.write(f"rf training time: {used_time}")
 
-    # Converting the datasets into DMatrix format for XGBoost prediction
-    dtrain = xgb.DMatrix(X_train, label=y_train)
+    param = study.best_trial.params.copy()
+    param['random_state'] = 42
+    param['n_jobs'] = -1
 
-    # Get best parameters from the study
-    best_params = study.best_trial.params.copy()
-    best_params['seed'] = 42
-
-    # Train the final model
-    final_model = xgb.train(
-        params=best_params,
-        dtrain=dtrain,
-        num_boost_round=study.best_trial.user_attrs['best_iteration']+1,
-        verbose_eval=0, # change to 2 to view train-rmse valid-rmse per boost round, printed every 2 boosting stages
-    )
+    # use best parameters to retrain the model
+    model = RandomForestRegressor(**param)
+    model.fit(X_train, y_train)
 
     # Save the final model (optional)
-    final_model.save_model(f"{save_dir}final_model_.json")
+    joblib.dump(model, f"{save_dir}final_model_.joblib")
 
     print("\nFinal model trained, best parameters saved successfully!")
-    return final_model
+    return model
 
 
 
@@ -425,6 +355,9 @@ def evaluate_and_plot(final_model, y, x, tipe, save_dir):
     y (array-like): Actual values for testing
     tipe: str, 'train' or 'test'
     save_dir (str): Directory to save the output files
+    
+    Returns:
+    - None
     """
     
     # Calculate predictions
@@ -511,8 +444,6 @@ def evaluate_and_plot(final_model, y, x, tipe, save_dir):
     return
 
 
-
-
 # SHAP based feature importance 
 def compute_and_plot_shap(final_model, X_train, save_dir):
     """
@@ -522,6 +453,9 @@ def compute_and_plot_shap(final_model, X_train, save_dir):
     final_model: Trained model for SHAP explanation
     X_train: Training data
     save_dir (str): Directory to save the output files
+    
+    Returns:
+    - None
     """
     
     # # Try to use GPUTree explainer, fall back to TreeExplainer if not available
@@ -535,15 +469,21 @@ def compute_and_plot_shap(final_model, X_train, save_dir):
 
     # Compute SHAP values with additivity check disabled
     shap_values_array = explainer.shap_values(X_train, check_additivity=False)
-    print(f'n\🚀 shap_values_array.shape: {shap_values_array.shape}')
+    print(f'⚓shap_values_array.shape: {shap_values_array.shape}') 
+    print(shap_values_array)
+    
     # Wrap shap_values_array in a shap.Explanation object
     shap_values = shap.Explanation(values=shap_values_array, 
                                    base_values=explainer.expected_value,
                                    data=X_train,
                                    feature_names=X_train.columns)
+    print(f'⚓shap_values.shape: {shap_values.shape}') 
+    print(shap_values)
 
     # Convert SHAP values to a DataFrame for saving
     shap_df = pd.DataFrame(shap_values_array, columns=X_train.columns)
+    print(f'shap_df: {shap_df.shape}')
+    display(shap_df)
     shap_df.to_csv(f"{save_dir}shap_values.csv", index=False)
     print("\nSHAP values saved to CSV successfully!")
 
@@ -637,19 +577,6 @@ def plot_optuna_results(study, save_dir, width=500, height=500):
     fig_optimization_history.write_html(f"{save_dir}plot_optimization_history.html")
     #fig_optimization_history.show(close=True)
 
-    # Plot intermediate values
-    fig_intermediate_values = optuna.visualization.plot_intermediate_values(study)
-    fig_intermediate_values.update_layout(
-        title="Intermediate Objective Values (RMSE) per Trial",
-        xaxis_title="Step (number of rounds or iterations within a trial)",
-        yaxis_title="Objective value (RMSE)",
-        legend_title="Trial Number",
-        # width=width,
-        # height=height,        
-    )
-    fig_intermediate_values.write_html(f"{save_dir}plot_intermediate_values.html")
-    #fig_intermediate_values.show(close=True)
-
     # Plot hyperparameter importance
     fig_param_importances = optuna.visualization.plot_param_importances(
         study,
@@ -691,7 +618,7 @@ if __name__ == "__main__":
     
     # create export folder to store outputs
     # e.g. create folder "../run/exp"
-    def create_directory(base_path = "../run/ssp/xgb/before_boruta/yearly_stats_median/"):
+    def create_directory(base_path =  "../run/ssp/rf/before_boruta/yearly_stats_median/"):
     
         counter = 0
     
@@ -723,6 +650,7 @@ if __name__ == "__main__":
             'S1_VH_imcorr1_max', 'S1_VH_imcorr1_mean', 'S1_VH_imcorr1_median', 'S1_VH_imcorr1_min', 'S1_VH_imcorr1_range', 'S1_VH_imcorr1_std', 
             'S1_VH_imcorr2_max', 'S1_VH_imcorr2_mean', 'S1_VH_imcorr2_median', 'S1_VH_imcorr2_min', 'S1_VH_imcorr2_range', 'S1_VH_imcorr2_std', 
             'S1_VH_inertia_max', 'S1_VH_inertia_mean', 'S1_VH_inertia_median', 'S1_VH_inertia_min', 'S1_VH_inertia_range', 'S1_VH_inertia_std', 
+            'S1_VH_maxcorr_max', 'S1_VH_maxcorr_mean', 'S1_VH_maxcorr_median', 'S1_VH_maxcorr_min', 'S1_VH_maxcorr_range', 'S1_VH_maxcorr_std', 
             'S1_VH_prom_max', 'S1_VH_prom_mean', 'S1_VH_prom_median', 'S1_VH_prom_min', 'S1_VH_prom_range', 'S1_VH_prom_std', 
             'S1_VH_savg_max', 'S1_VH_savg_mean', 'S1_VH_savg_median', 'S1_VH_savg_min', 'S1_VH_savg_range', 'S1_VH_savg_std', 
             'S1_VH_sent_max', 'S1_VH_sent_mean', 'S1_VH_sent_median', 'S1_VH_sent_min', 'S1_VH_sent_range', 'S1_VH_sent_std', 
@@ -741,6 +669,7 @@ if __name__ == "__main__":
             'S1_VV_imcorr1_max', 'S1_VV_imcorr1_mean', 'S1_VV_imcorr1_median', 'S1_VV_imcorr1_min', 'S1_VV_imcorr1_range', 'S1_VV_imcorr1_std', 
             'S1_VV_imcorr2_max', 'S1_VV_imcorr2_mean', 'S1_VV_imcorr2_median', 'S1_VV_imcorr2_min', 'S1_VV_imcorr2_range', 'S1_VV_imcorr2_std', 
             'S1_VV_inertia_max', 'S1_VV_inertia_mean', 'S1_VV_inertia_median', 'S1_VV_inertia_min', 'S1_VV_inertia_range', 'S1_VV_inertia_std', 
+            'S1_VV_maxcorr_max', 'S1_VV_maxcorr_mean', 'S1_VV_maxcorr_median', 'S1_VV_maxcorr_min', 'S1_VV_maxcorr_range', 'S1_VV_maxcorr_std', 
             'S1_VV_prom_max', 'S1_VV_prom_mean', 'S1_VV_prom_median', 'S1_VV_prom_min', 'S1_VV_prom_range', 'S1_VV_prom_std', 
             'S1_VV_savg_max', 'S1_VV_savg_mean', 'S1_VV_savg_median', 'S1_VV_savg_min', 'S1_VV_savg_range', 'S1_VV_savg_std', 
             'S1_VV_sent_max', 'S1_VV_sent_mean', 'S1_VV_sent_median', 'S1_VV_sent_min', 'S1_VV_sent_range', 'S1_VV_sent_std', 
@@ -748,8 +677,10 @@ if __name__ == "__main__":
             'S1_VV_svar_max', 'S1_VV_svar_mean', 'S1_VV_svar_median', 'S1_VV_svar_min', 'S1_VV_svar_range', 'S1_VV_svar_std', 
             'S1_VV_var_max', 'S1_VV_var_mean', 'S1_VV_var_median', 'S1_VV_var_min', 'S1_VV_var_range', 'S1_VV_var_std', 
             'S1_VV_max', 'S1_VV_mean', 'S1_VV_median', 'S1_VV_min', 'S1_VV_range', 'S1_VV_std', 
-
-            
+            'S2_B10_max', 'S2_B10_mean', 'S2_B10_median', 'S2_B10_min', 'S2_B10_range', 'S2_B10_std', 
+            'S2_B11_max', 'S2_B11_mean', 'S2_B11_median', 'S2_B11_min', 'S2_B11_range', 'S2_B11_std', 
+            'S2_B12_max', 'S2_B12_mean', 'S2_B12_median', 'S2_B12_min', 'S2_B12_range', 'S2_B12_std', 
+            'S2_B1_max', 'S2_B1_mean', 'S2_B1_median', 'S2_B1_min', 'S2_B1_range', 'S2_B1_std', 
             'S2_B2_max', 'S2_B2_mean', 'S2_B2_median', 'S2_B2_min', 'S2_B2_range', 'S2_B2_std', 
             'S2_B3_max', 'S2_B3_mean', 'S2_B3_median', 'S2_B3_min', 'S2_B3_range', 'S2_B3_std', 
             'S2_B4_max', 'S2_B4_mean', 'S2_B4_median', 'S2_B4_min', 'S2_B4_range', 'S2_B4_std', 
@@ -758,9 +689,7 @@ if __name__ == "__main__":
             'S2_B7_max', 'S2_B7_mean', 'S2_B7_median', 'S2_B7_min', 'S2_B7_range', 'S2_B7_std', 
             'S2_B8A_max', 'S2_B8A_mean', 'S2_B8A_median', 'S2_B8A_min', 'S2_B8A_range', 'S2_B8A_std', 
             'S2_B8_max', 'S2_B8_mean', 'S2_B8_median', 'S2_B8_min', 'S2_B8_range', 'S2_B8_std', 
-            'S2_B11_max', 'S2_B11_mean', 'S2_B11_median', 'S2_B11_min', 'S2_B11_range', 'S2_B11_std', 
-            'S2_B12_max', 'S2_B12_mean', 'S2_B12_median', 'S2_B12_min', 'S2_B12_range', 'S2_B12_std', 
-            
+            'S2_B9_max', 'S2_B9_mean', 'S2_B9_median', 'S2_B9_min', 'S2_B9_range', 'S2_B9_std', 
             'S2_CIgreen_max', 'S2_CIgreen_mean', 'S2_CIgreen_median', 'S2_CIgreen_min', 'S2_CIgreen_range', 'S2_CIgreen_std', 
             'S2_CIre_max', 'S2_CIre_mean', 'S2_CIre_median', 'S2_CIre_min', 'S2_CIre_range', 'S2_CIre_std', 
             'S2_DVI_max', 'S2_DVI_mean', 'S2_DVI_median', 'S2_DVI_min', 'S2_DVI_range', 'S2_DVI_std', 
@@ -794,7 +723,6 @@ if __name__ == "__main__":
             'S2_SAVI_max', 'S2_SAVI_mean', 'S2_SAVI_median', 'S2_SAVI_min', 'S2_SAVI_range', 'S2_SAVI_std', 
             'S2_SR_max', 'S2_SR_mean', 'S2_SR_median', 'S2_SR_min', 'S2_SR_range', 'S2_SR_std', 
             'S2_kNDVI_max', 'S2_kNDVI_mean', 'S2_kNDVI_median', 'S2_kNDVI_min', 'S2_kNDVI_range', 'S2_kNDVI_std', 
-            
             'P2_HH+HV_max', 'P2_HH+HV_mean', 'P2_HH+HV_median', 'P2_HH+HV_min', 'P2_HH+HV_range', 'P2_HH+HV_std', 
             'P2_HH-HV_max', 'P2_HH-HV_mean', 'P2_HH-HV_median', 'P2_HH-HV_min', 'P2_HH-HV_range', 'P2_HH-HV_std', 
             'P2_HH_asm_max', 'P2_HH_asm_mean', 'P2_HH_asm_median', 'P2_HH_asm_min', 'P2_HH_asm_range', 'P2_HH_asm_std', 
@@ -808,6 +736,7 @@ if __name__ == "__main__":
             'P2_HH_imcorr1_max', 'P2_HH_imcorr1_mean', 'P2_HH_imcorr1_median', 'P2_HH_imcorr1_min', 'P2_HH_imcorr1_range', 'P2_HH_imcorr1_std', 
             'P2_HH_imcorr2_max', 'P2_HH_imcorr2_mean', 'P2_HH_imcorr2_median', 'P2_HH_imcorr2_min', 'P2_HH_imcorr2_range', 'P2_HH_imcorr2_std', 
             'P2_HH_inertia_max', 'P2_HH_inertia_mean', 'P2_HH_inertia_median', 'P2_HH_inertia_min', 'P2_HH_inertia_range', 'P2_HH_inertia_std', 
+            'P2_HH_maxcorr_max', 'P2_HH_maxcorr_mean', 'P2_HH_maxcorr_median', 'P2_HH_maxcorr_min', 'P2_HH_maxcorr_range', 'P2_HH_maxcorr_std', 
             'P2_HH_prom_max', 'P2_HH_prom_mean', 'P2_HH_prom_median', 'P2_HH_prom_min', 'P2_HH_prom_range', 'P2_HH_prom_std', 
             'P2_HH_savg_max', 'P2_HH_savg_mean', 'P2_HH_savg_median', 'P2_HH_savg_min', 'P2_HH_savg_range', 'P2_HH_savg_std', 
             'P2_HH_sent_max', 'P2_HH_sent_mean', 'P2_HH_sent_median', 'P2_HH_sent_min', 'P2_HH_sent_range', 'P2_HH_sent_std',
@@ -827,6 +756,7 @@ if __name__ == "__main__":
             'P2_HV_imcorr1_max', 'P2_HV_imcorr1_mean', 'P2_HV_imcorr1_median', 'P2_HV_imcorr1_min', 'P2_HV_imcorr1_range', 'P2_HV_imcorr1_std',
             'P2_HV_imcorr2_max', 'P2_HV_imcorr2_mean', 'P2_HV_imcorr2_median', 'P2_HV_imcorr2_min', 'P2_HV_imcorr2_range', 'P2_HV_imcorr2_std',
             'P2_HV_inertia_max', 'P2_HV_inertia_mean', 'P2_HV_inertia_median', 'P2_HV_inertia_min', 'P2_HV_inertia_range', 'P2_HV_inertia_std', 
+            'P2_HV_maxcorr_max', 'P2_HV_maxcorr_mean', 'P2_HV_maxcorr_median', 'P2_HV_maxcorr_min', 'P2_HV_maxcorr_range', 'P2_HV_maxcorr_std',
             'P2_HV_prom_max', 'P2_HV_prom_mean', 'P2_HV_prom_median', 'P2_HV_prom_min', 'P2_HV_prom_range', 'P2_HV_prom_std', 
             'P2_HV_savg_max', 'P2_HV_savg_mean', 'P2_HV_savg_median', 'P2_HV_savg_min', 'P2_HV_savg_range', 'P2_HV_savg_std', 
             'P2_HV_sent_max', 'P2_HV_sent_mean', 'P2_HV_sent_median', 'P2_HV_sent_min', 'P2_HV_sent_range', 'P2_HV_sent_std', 
@@ -836,106 +766,114 @@ if __name__ == "__main__":
             'P2_HV_max', 'P2_HV_mean', 'P2_HV_median', 'P2_HV_min', 'P2_HV_range', 'P2_HV_std', 
             'Aspect', 'Ele', 'Slope'
            ]
+
     # load data: train, val and test
     for dataset in['training', 'validation', 'test']:
         if dataset == 'training':
-            train_path = "../data/train_yearly_stats_median.csv"  
-            X_train, y_train, dtrain = prepare_DMatrix_array(train_path, cols, dataset, directory, cover_type=None)
+            train_path =  "../data/train_yearly_stats_median.csv"  
+            X_train, y_train = prepare_df(train_path, cols, dataset, directory, cover_type=None)
             plot_target_histograms(y_train, dataset, directory)
             # split cover
-            X_train_Croplands, y_train_Croplands,dtrain_Croplands  = prepare_DMatrix_array(train_path, cols, dataset, directory, cover_type="Croplands")
-            X_train_Forests, y_train_Forests,dtrain_Forests  = prepare_DMatrix_array(train_path, cols, dataset, directory, cover_type="Forests")
-            X_train_Savannas, y_train_Savannas,dtrain_Savannas = prepare_DMatrix_array(train_path, cols, dataset, directory, cover_type="Savannas")
-            X_train_Shrub_grass_lands, y_train_Shrub_grass_lands,dtrain_Shrub_grass_lands  = prepare_DMatrix_array(train_path, cols, dataset, directory, cover_type="Shrub_grass_lands")
+            X_train_Croplands, y_train_Croplands = prepare_df(train_path, cols, dataset, directory, cover_type="Croplands")
+            X_train_Forests, y_train_Forests = prepare_df(train_path, cols, dataset, directory, cover_type="Forests")
+            X_train_Savannas, y_train_Savannas= prepare_df(train_path, cols, dataset, directory, cover_type="Savannas")
+            X_train_Shrub_grass_lands, y_train_Shrub_grass_lands = prepare_df(train_path, cols, dataset, directory, cover_type="Shrub_grass_lands")            
+
             
         elif dataset == "validation":
-            val_path ="../data/val_yearly_stats_median.csv" 
-            X_val, y_val, dval = prepare_DMatrix_array(val_path, cols, dataset, directory)
+            val_path = "../data/val_yearly_stats_median.csv" 
+            X_val, y_val = prepare_df(val_path, cols, dataset, directory, cover_type=None)
             plot_target_histograms(y_val, dataset, directory)
+            # split cover
+            X_val_Croplands, y_val_Croplands = prepare_df(val_path, cols, dataset, directory, cover_type="Croplands")
+            X_val_Forests, y_val_Forests = prepare_df(val_path, cols, dataset, directory, cover_type="Forests")
+            X_val_Savannas, y_val_Savannas= prepare_df(val_path, cols, dataset, directory, cover_type="Savannas")
+            X_val_Shrub_grass_lands, y_val_Shrub_grass_lands = prepare_df(val_path, cols, dataset, directory, cover_type="Shrub_grass_lands")  
+
             
         else:
             test_path = "../data/test_yearly_stats_median.csv" 
-            X_test, y_test, dtest = prepare_DMatrix_array(test_path, cols, dataset, directory)
+            X_test, y_test = prepare_df(test_path, cols, dataset, directory, cover_type=None)
             plot_target_histograms(y_test, dataset, directory)
             # split cover
-            X_test_Croplands, y_test_Croplands,dtest_Croplands = prepare_DMatrix_array(test_path, cols, dataset, directory, cover_type="Croplands")
-            X_test_Forests, y_testForests,dtest_Forests = prepare_DMatrix_array(test_path, cols, dataset, directory, cover_type="Forests")
-            X_test_Savannas, y_test_Savannas,dtest_Savannas= prepare_DMatrix_array(test_path, cols, dataset, directory, cover_type="Savannas")
-            X_test_Shrub_grass_lands, y_test_Shrub_grass_lands,dtest_Shrub_grass_lands = prepare_DMatrix_array(test_path, cols, dataset, directory, cover_type="Shrub_grass_lands")  
+            X_test_Croplands, y_test_Croplands = prepare_df(test_path, cols, dataset, directory, cover_type="Croplands")
+            X_test_Forests, y_testForests = prepare_df(test_path, cols, dataset, directory, cover_type="Forests")
+            X_test_Savannas, y_test_Savannas= prepare_df(test_path, cols, dataset, directory, cover_type="Savannas")
+            X_test_Shrub_grass_lands, y_test_Shrub_grass_lands = prepare_df(test_path, cols, dataset, directory, cover_type="Shrub_grass_lands")  
+
             
     # training starts
     starttime = datetime.now()
 
-    # # Set up the Optuna study using the TPESampler and MedianPruner
+    # # Set up the Optuna study using the TPESampler 
     # study = optuna.create_study(
     #     # sampler=optuna.samplers.RandomSampler(seed=42),
     #     sampler=optuna.samplers.TPESampler(n_startup_trials=100),
     #     # sampler=optunahub.load_module( "samplers/auto_sampler").AutoSampler(n_startup_trials=100), 
-    #     # pruner=optuna.pruners.MedianPruner(n_startup_trials=100, n_warmup_steps=100),
+
     #     direction='minimize'
     # )
     
-    # Set up the Optuna study using the TPESampler and MedianPruner
+    # Set up the Optuna study using the TPESampler and 
     study = optuna.create_study(
         # sampler=optuna.samplers.RandomSampler(seed=42),
         sampler=optuna.samplers.TPESampler(n_startup_trials=100),
-        # sampler=optuna.samplers.GPSampler(n_startup_trials=100),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=100, n_warmup_steps=100),
+        # sampler=optuna.samplers.GPSampler(n_startup_trials=100),,
         direction='minimize'
     )
     # optimization
     from functools import partial
     study.optimize(partial(objective, save_dir=directory), 
-                   n_trials=2000,
-                   n_jobs=64,
-                   catch=(xgb.core.XGBoostError,)
-                  )
-     #end_time
+                   n_trials=2,
+                   n_jobs=64
+                  )  
+    
+    #end_time
     endtime = datetime.now()
     used_time = endtime - starttime
     
-    print(f"\n--xgb training time--: {used_time }")
+    print(f"\n--rf training time--: {used_time }")
 
     # train and test rmse in best trial
-    get_best_trial_metrics(study, dtrain, directory)
+    get_best_trial_metrics(study, X_train, y_train, X_val, y_val, directory)
     
     # save scatterplot of test, prediection in dataframe using trained model
     final_model= save_best_results_and_train_model(study, X_train, y_train, directory)     
-
-
+    
     # save train and test scatter plot
     for tipe in ['train_all','train_crop','train_forest','train_savannas','train_shrubgrass',
-                 'test_all','test_crop','test_forest','test_savannas','test_shrubgrass']:    
+                 'test_all','test_crop','test_forest','test_savannas','test_shrubgrass']:
+    
         if tipe == 'train_all':
             y = y_train
-            x = dtrain    
+            x = X_train    
         elif tipe == 'train_crop':
             y = y_train_Croplands
-            x = dtrain_Croplands   
+            x = X_train_Croplands   
         elif tipe == 'train_forest':
             y = y_train_Forests
-            x = dtrain_Forests    
+            x = X_train_Forests    
         elif tipe == 'train_savannas':
             y = y_train_Savannas
-            x = dtrain_Savannas    
+            x = X_train_Savannas    
         elif tipe == 'train_shrubgrass':
             y = y_train_Shrub_grass_lands
-            x = dtrain_Shrub_grass_lands    
+            x = X_train_Shrub_grass_lands    
         elif tipe == 'test_all':
             y = y_test
-            x = dtest    
+            x = X_test    
         elif tipe == 'test_crop':
             y = y_test_Croplands
-            x = dtest_Croplands    
+            x = X_test_Croplands    
         elif tipe == 'test_forest':
             y = y_testForests
-            x = dtest_Forests    
+            x = X_test_Forests    
         elif tipe == 'test_savannas':
             y = y_test_Savannas
-            x = dtest_Savannas    
+            x = X_test_Savannas    
         else:  # test_shrubgrass
             y = y_test_Shrub_grass_lands
-            x = dtest_Shrub_grass_lands    
+            x = X_test_Shrub_grass_lands    
         evaluate_and_plot(final_model, y, x, tipe, directory)
     
     # save SHAP 
