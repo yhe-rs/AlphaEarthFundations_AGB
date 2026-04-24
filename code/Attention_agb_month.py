@@ -108,14 +108,9 @@ else:
         print(f"GPU Load: {round(gpu.load * 100, 2)}%")
         print(f"GPU Temperature: {gpu.temperature}°C")
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
+
 import math
 import optuna
-
 print("\n******Current working dir", os.getcwd())
 
 print('torch=:',torch.__version__)
@@ -124,10 +119,11 @@ print('optuna=:',optuna.__version__)
 print("CUDA available:", torch.cuda.is_available())
 print("CUDA device count:", torch.cuda.device_count())
 
-
 # load and preprocess data
-def prepare_df(csv_path, cols, dataset, save_dir, timestamp=12, cover_type=None):
+def prepare_df(csv_path, cols, dataset, save_dir, cover_type=None):
     """
+    Load data from a CSV file, preprocess it, and convert it into a df for rf.
+
     Parameters:
     - csv_path: Path to the CSV file.
     - cols: List of column names for features.
@@ -136,77 +132,33 @@ def prepare_df(csv_path, cols, dataset, save_dir, timestamp=12, cover_type=None)
     - cover_type: landcover type to filter (optional)
 
     Returns:
-    - X_df: DataFrame of features.
-    - y_series: Series of target variable.
+    - X: DataFrame of features.
+    - y: Series of target variable.
     """
 
     # Load the data
     df = pd.read_csv(csv_path)
 
-    # Optional filtering
+    # Filter by land cover if specified
     if cover_type is not None:
-        df = df[df["Cover"] == cover_type].copy()
+        df = df[df["Cover"] == cover_type]
         print(f"Filtering for cover type: {cover_type}")
     else:
         print("Using all land cover types")
 
-    # -----------------------------
-    # Grouping columns
-    # -----------------------------
-    group_cols = ["Lat", "Lon", "INFyS_date", "AGBD"]
+    # Select features and target
+    X = df[cols]
+    y = df["AGBD"]
 
-    # -----------------------------
-    # Temporal ordering
-    # -----------------------------
-    df["quarter_order"] = df["quarter"].map({
-        "Q1": 1,
-        "Q2": 2,
-        "Q3": 3,
-        "Q4": 4,
-    })
+    print(f"\nTotal {dataset} samples:", len(X))
 
-    df = df.sort_values(by=group_cols + ["quarter_order"]).reset_index(drop=True)
+    print("\nRF dataframe prepared successfully!")
 
-    X_list = []   # will collect rows that belong to valid sequences
-    y_list = []
+    with open(f"{save_dir}_used_features.txt", "w") as file:
+        file.write(f"used features:\n{cols}")
 
-    # -----------------------------
-    # Group and filter by exact timestamp length
-    # -----------------------------
-    for key, group in df.groupby(group_cols):
-        group = group.sort_values("quarter_order")
-
-        # Enforce fixed sequence length (consistency check)
-        if len(group) != timestamp:
-            continue
-
-        # Keep all rows of this valid group
-        X_list.append(group)
-
-        # Take AGBD (same for the whole group)
-        y_val = group["AGBD"].iloc[0]
-        y_list.append(y_val)
-
-    # ========================== Build output ==========================
-    if len(X_list) == 0:
-        print(f"Warning: No valid sequences with exactly {timestamp} timesteps found.")
-        X_df = pd.DataFrame(columns=df.columns)
-        y_series = pd.Series([], name="AGBD", dtype=np.float64)
-    else:
-        # Concatenate all valid groups back into one DataFrame
-        X_df = pd.concat(X_list, ignore_index=True)
-
-        # y as pandas Series (like df["AGBD"])
-        y_series = pd.Series(y_list, name="AGBD", dtype=np.float64)
-
-    print(f"Prepared from {csv_path}:")
-    print(f"   → X_df shape : {X_df.shape}   (only groups with exactly {timestamp} timesteps)")
-    print(f"   → y_series shape : {y_series.shape}   ({len(y_series)} valid samples)")
-    
-    X = X_df[cols]
-    y = y_series
-    
     return X, y
+
 
 
 
@@ -249,16 +201,16 @@ def plot_target_histograms(y, datatype, save_dir):
    
     return
 
-def standard_df(X, y, save_dir):
+def standard_df(X_train, y_train, save_dir):
     """
-    Load data from a CSV file, preprocess it, and convert it into a df for rf.
+    Load data from a CSV file, preprocess it, and convert it into a df for nn.
 
     Parameters:
     - save_dir: Directory path to save preprocessed data.
 
     Returns:
-    - X: DataFrame of features.
-    - y: Series of target variable.
+    - X_train: DataFrame of features.
+    - y_train: Series of target variable.
     """
 
     # Scale features and target
@@ -266,201 +218,224 @@ def standard_df(X, y, save_dir):
     target_scaler = StandardScaler()
 
     # Scale features (X is already 2D)
-    X_scaled = feature_scaler.fit_transform(X)
+    X_train_scaled = feature_scaler.fit_transform(X_train)
 
     # Scale target (must be 2D)
-    y_scaled = target_scaler.fit_transform(
-        y.values.reshape(-1, 1)
+    y_train_scaled = target_scaler.fit_transform(
+        y_train.values.reshape(-1, 1)
     )
 
     # save scaler
     joblib.dump(feature_scaler, f'{save_dir}feature_scaler.joblib')
     joblib.dump(target_scaler, f'{save_dir}target_scaler.joblib')
 
-    print(f"\n🚀X_scaled_shape:\n", X_scaled.shape)
-    print(f"\n🚀y_scaled_shape:\n", y_scaled.shape)  
-    print(f"\n🚀X.head(2):\n", X.head(2))
-    print(f"\n🚀X_scaled[:2]:\n", X_scaled[:2])
-    print(f"\n🚀y.head(2):\n", y.head(2))
-    print(f"\n🚀y_scaled[:2]:\n", y_scaled[:2])
+                       
+    print(f"\n🚀X_train.head(1):\n", X_train.head(1))
+    print(f"\n🚀X_train_scaled[:1]:\n", X_train_scaled[:1])
+    print(f"\n🚀y_train.head(1):\n", y_train.head(1))
+    print(f"\n🚀y_train_scaled[:1]:\n", y_train_scaled[:1])
     print("\nDataframe StandardScaler successfully!")
     
-    return X_scaled, y_scaled,  feature_scaler, target_scaler
+    return X_train_scaled, y_train_scaled,  feature_scaler, target_scaler
 
 
-def prepare_seq(X_scaled, y_scaled, timestamp=12):
-    """
-    Reshape the flat scaled data into 3D format for LSTM / Transformer.
-    
-    Parameters:
-    - X_scaled: 2D numpy array from standard_df()  → shape (total_rows, n_features)
-    - y_scaled: 2D numpy array from standard_df()  → shape (n_samples, 1)
-    - timestamp: number of timesteps per sequence (default=2)
-    
-    Returns:
-    - X_3d: numpy array of shape (n_samples, timestamp, n_features)
-    - y_2d: numpy array of shape (n_samples, 1)   # ready for model.fit()
-    """
-    import numpy as np
-    
-    print(f"\n🔄 Reshaping data to 3D sequence format (timestamp={timestamp})...")
-    
-    # Check if inputs are numpy arrays
-    if not isinstance(X_scaled, np.ndarray):
-        X_scaled = np.array(X_scaled)
-    if not isinstance(y_scaled, np.ndarray):
-        y_scaled = np.array(y_scaled)
-    
-    n_features = X_scaled.shape[1]
-    n_samples = len(y_scaled)                   # Each y corresponds to one full sequence
-    
-    # Reshape X to 3D: (n_samples, timestamp, n_features)
-    X_3d = X_scaled.reshape(n_samples, timestamp, n_features)
-    
-    # y_scaled is already (n_samples, 1), but we ensure it's 2D
-    y_2d = y_scaled.reshape(-1, 1)
-    
-    print(f"✅ Successfully reshaped:")
-    print(f"   X_3d shape : {X_3d.shape}   ← (n_samples, timesteps={timestamp}, features={n_features})")
-    print(f"   y_2d shape  : {y_2d.shape}   ← (n_samples, 1)")
-    
-    # Optional: Show a small sample for verification
-    print(f"\nSample of first sequence (scaled):")
-    print(X_3d[0])
-    
-    return X_3d, y_2d
-
-
-# Updated prepare_tensor (see detailed version above)
 def prepare_tensor(X_scaled: np.ndarray, y_scaled: np.ndarray):
-    X_tensor = torch.FloatTensor(X_scaled) # (n_samples, 2, 124)
-    y_tensor = torch.FloatTensor(y_scaled)                # (n_samples, 1)
-    
+    """
+    Convert scaled data into a PyTorch TensorDataset.
+    Input shape: X (n_samples, 64), y (n_samples, 1)
+    """
+    X_tensor = torch.FloatTensor(X_scaled)          # (n_samples, 64)
+    y_tensor = torch.FloatTensor(y_scaled)          # (n_samples, 1)
+
     dataset = TensorDataset(X_tensor, y_tensor)
-    
-    print(f"✅ GRU-compatible TensorDataset created → {len(dataset)} samples, "
+    print(f"✅ TensorDataset created → {len(dataset)} samples, "
           f"X shape: {X_tensor.shape}, y shape: {y_tensor.shape}")
-    
     return dataset
-    
-# ==================== Sinusoidal Positional Encoding ====================
-class SinusoidalPositionalEncoding(nn.Module):
-    """
-    Standard sinusoidal positional encoding (as in "Attention is All You Need").
-    Added only to the feature tokens (not to the CLS token), since CLS is a special learnable token.
-    """
-    def __init__(self, d_model: int, max_len: int = 100):
+
+# # -----------------------------
+# # Model Definition (residual connections)
+# #  initialization kaiming_uniform_(a=√5)
+# # -----------------------------
+# class MLPBlock(nn.Module):
+#     def __init__(self, in_features, out_features, dropout, use_batchnorm=False):
+#         super().__init__()
+#         self.linear = nn.Linear(in_features, out_features)
+        
+#         if use_batchnorm:
+#             self.norm = nn.BatchNorm1d(out_features)
+#         else:
+#             self.norm = nn.LayerNorm(out_features)
+            
+#         self.relu = nn.ReLU(inplace=True)
+#         self.dropout = nn.Dropout(dropout)
+        
+#         # Add projection for residual connection if dimensions don't match
+#         self.proj = None
+#         if in_features != out_features:
+#             self.proj = nn.Linear(in_features, out_features)
+
+#     def forward(self, x):
+#         residual = x
+        
+#         x = self.linear(x)
+#         x = self.norm(x)
+#         x = self.relu(x)
+#         x = self.dropout(x)
+        
+#         # Apply projection to residual if needed (for dimension matching)
+#         if self.proj is not None:
+#             residual = self.proj(residual)
+        
+#         # Residual addition
+#         x = x + residual
+#         return x
+
+# class MLPRegressor(nn.Module):
+#     def __init__(self, input_size, output_size, hidden_sizes, dropouts, use_batchnorm=False):
+#         super().__init__()
+#         if len(hidden_sizes) != len(dropouts):
+#             raise ValueError("hidden_sizes and dropouts must have the same length")
+#         layers = []
+#         prev_size = input_size
+        
+#         for h_size, d_prob in zip(hidden_sizes, dropouts):
+#             layers.append(MLPBlock(prev_size, h_size, d_prob, use_batchnorm))
+#             prev_size = h_size
+            
+#         self.hidden_layers = nn.Sequential(*layers)
+#         self.output_layer = nn.Linear(prev_size, output_size)
+        
+#     def forward(self, x):
+#         x = self.hidden_layers(x)
+#         return self.output_layer(x)
+
+
+
+# -----------------------------
+# Model Definition (residual connections)
+#  initialization original kaiming_uniform
+# -----------------------------
+class MLPBlock(nn.Module):
+    def __init__(self, in_features, out_features, dropout, use_batchnorm=False):
         super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
         
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model))
+        # === Proper He/Kaiming for ReLU ===
+        nn.init.kaiming_uniform_(self.linear.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.zeros_(self.linear.bias)          # best practice instead of uniform bias
+
+        if use_batchnorm:  
+            self.norm = nn.BatchNorm1d(out_features)  
+        else:  
+            self.norm = nn.LayerNorm(out_features)  
+              
+        self.relu = nn.ReLU(inplace=True)  
+        self.dropout = nn.Dropout(dropout)  
+          
+        # Residual projection (also needs correct init)
+        self.proj = None
+        if in_features != out_features:  
+            self.proj = nn.Linear(in_features, out_features)
+            nn.init.kaiming_uniform_(self.proj.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x):  
+        residual = x
+        x = self.linear(x)
+        x = self.norm(x)
+        x = self.relu(x)
+        x = self.dropout(x)
         
-        pe[:, 0::2] = torch.sin(position * div_term)   # even indices
-        pe[:, 1::2] = torch.cos(position * div_term)   # odd indices
+        if self.proj is not None:
+            residual = self.proj(residual)
         
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
-        self.register_buffer('pe', pe)
-    
-    def forward(self, x):
-        """
-        x: (batch_size, seq_len, d_model)
-        """
-        return x + self.pe[:, :x.size(1), :]
+        x = x + residual
+        return x
 
 
-# ==================== Updated Transformer Model (with Positional Encoding) ====================
-class TransformerModel(nn.Module):
-    def __init__(self, input_size, d_model, nhead, num_layers, dim_feedforward, dropout, output_size):
-        super(TransformerModel, self).__init__()
-
-        # Ensure d_model is divisible by nhead (PyTorch requirement)
-        assert d_model % nhead == 0, f"d_model ({d_model}) must be divisible by nhead ({nhead})"
-
-        self.input_proj = nn.Linear(input_size, d_model)  # learned projection for continuous features
+class MLPRegressor(nn.Module):
+    def __init__(self, input_size, output_size, hidden_sizes, dropouts, use_batchnorm=False):
+        super().__init__()
+        if len(hidden_sizes) != len(dropouts):
+            raise ValueError("hidden_sizes and dropouts must have the same length")
         
-        # Positional encoding applied ONLY to the 64 feature tokens (not CLS)
-        self.pos_enc = SinusoidalPositionalEncoding(d_model=d_model, max_len=12)
-        
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        layers = []
+        prev_size = input_size
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-            norm_first=False
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.output_proj = nn.Linear(d_model, output_size)
-
-    def forward(self, x):
-        # x: (batch_size, seq_len=64, input_size=1)
-        batch_size = x.shape[0]
+        for h_size, d_prob in zip(hidden_sizes, dropouts):  
+            layers.append(MLPBlock(prev_size, h_size, d_prob, use_batchnorm))  
+            prev_size = h_size
+              
+        self.hidden_layers = nn.Sequential(*layers)  
         
-        x = self.input_proj(x)                                 # (batch, 64, d_model)
-        x = self.pos_enc(x)                                    # Add positional encoding to features only
-        
-        cls_token = self.cls_token.expand(batch_size, 1, -1)    # (batch, 1, d_model)
-        x = torch.cat((cls_token, x), dim=1)                    # (batch, 65, d_model) → CLS has no PE
-        
-        x = self.transformer_encoder(x)                        # (batch, 65, d_model)
-
-        cls_out = x[:, 0, :]                                   # (batch, d_model)
-        out = self.output_proj(cls_out)                        # (batch, output_size)
-        return out
+        # Final regression head — also He init (though linear output is less critical)
+        self.output_layer = nn.Linear(prev_size, output_size)
+        nn.init.kaiming_uniform_(self.output_layer.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.zeros_(self.output_layer.bias)
+      
+    def forward(self, x):  
+        x = self.hidden_layers(x)
+        return self.output_layer(x)
 
 
-        
+
+
+
+# -----------------------------
+# Optuna Objective
+# -----------------------------
 def objective(trial, save_dir):
-    # --- Search Space ---
-    d_model = trial.suggest_categorical("d_model", [64, 128, 256, 512, 1024])
     
-    # Only suggest nhead values that divide d_model perfectly
-    possible_nheads = [h for h in [4, 8, 16] if d_model % h == 0]
-    if not possible_nheads:
-        raise ValueError(f"No valid nhead for d_model={d_model}")
-    nhead = trial.suggest_categorical("nhead", possible_nheads)
-    
-    num_layers = trial.suggest_categorical("num_layers", [2, 4, 6, 8, 10, 12])
-    dim_feedforward = trial.suggest_categorical("dim_feedforward", [256, 512, 1024, 2048])
-    initial_lr = trial.suggest_categorical("lr", [1e-2, 5e-3, 1e-3, 5e-4, 1e-4])
-    dropout = trial.suggest_float("dropout", 0.0, 0.6, step=0.05)
+    # --- 1. Define Search Space ---
+    num_layers = trial.suggest_int("num_layers", 1, 16, step=1)
     batch_size = trial.suggest_categorical("batch_size", [16, 32, 64, 128, 256, 512, 1024])
+    # weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=False)  # log scale often better
+    weight_decay = trial.suggest_categorical("weight_decay", [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 0])  # log scale often better
+    initial_lr = trial.suggest_categorical("lr", [1e-2, 1e-3, 1e-4, 1e-5])
     optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "AdamW", "RMSprop", "SGD"])
-    weight_decay = trial.suggest_categorical("weight_decay", [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 0]) 
+
+    hidden_sizes = []
+    dropouts = []
+    for i in range(num_layers):
+        layer_width = trial.suggest_categorical(f"layer_{i}_size", [16, 32, 64, 128, 256, 512])
+        hidden_sizes.append(layer_width)
+        
+        layer_dropout = trial.suggest_float(f"layer_{i}_dropout", 0.0, 0.6, step=0.1)
+        dropouts.append(layer_dropout)
     
-    # --- Setup Trial Objects ---
+    # Conditional normalization based on batch_size
+    use_batchnorm = True if batch_size >= 32 else False
+    # logging/printing
+    norm_type = "BatchNorm1d" if use_batchnorm else "LayerNorm"
+    print(f"\n🚩Trial {trial.number} | batch_size={batch_size} → Using {norm_type}")
+    print(f"Architecture: {hidden_sizes} | Dropouts: {dropouts}")
+
+    # --- 2. DataLoaders ---
     train_loader = DataLoader(train_tensor, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_tensor, batch_size=batch_size, shuffle=False)
 
-    model = TransformerModel(
+    # --- 3. Model, Optimizer, Scheduler, Loss ---
+    model = MLPRegressor(
         input_size=INPUT_SIZE,
-        d_model=d_model,
-        nhead=nhead,
-        num_layers=num_layers,
-        dim_feedforward=dim_feedforward,
-        dropout=dropout,
-        output_size=OUTPUT_SIZE 
+        output_size=OUTPUT_SIZE,
+        hidden_sizes=hidden_sizes,
+        dropouts=dropouts,
+        use_batchnorm=use_batchnorm
     ).to(DEVICE)
     
-    # --- Optimizer Initialization ---
+    # --- 4. Optimizer Initialization ---
     if optimizer_name == "Adam":
         optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, weight_decay=weight_decay)
     elif optimizer_name == "AdamW":
         optimizer = torch.optim.AdamW(model.parameters(), lr=initial_lr, weight_decay=weight_decay)
     elif optimizer_name == "RMSprop":
-        momentum = trial.suggest_float("rmsprop_momentum", 0.0, 0.99)
+        momentum = trial.suggest_float("rmsprop_momentum", 0.85, 0.99, step=0.01)
         optimizer = torch.optim.RMSprop(model.parameters(), lr=initial_lr, weight_decay=weight_decay, momentum=momentum)
     elif optimizer_name == "SGD":
-        momentum = trial.suggest_float("sgd_momentum", 0.0, 0.99)
+        momentum = trial.suggest_float("sgd_momentum", 0.85, 0.99, step=0.01)
         optimizer = torch.optim.SGD(model.parameters(), lr=initial_lr, weight_decay=weight_decay, momentum=momentum, nesterov=True)
-
-   
-    # loss   
     criterion = nn.MSELoss()
-
+    
     # === Print Model Structure ===   
     print("\n" + "="*50)
     print("MODEL ARCHITECTURE")
@@ -472,24 +447,31 @@ def objective(trial, save_dir):
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total trainable parameters: {total_params:,}")
     print("-"*50)
+    
+    # Option 3: Manual detailed print
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total trainable parameters: {total_params:,}")
+    print("-"*50)
 
-    # Scheduler & Early Stopping
+    # Scheduler: Reduce LR on plateau
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
-        factor=0.5,
-        patience=20,
-        # min_lr=1e-6,
+        factor=0.5,      # reduce LR by half
+        patience=20,      # wait # epochs without improvement
+        min_lr=0, #1e-6,
     )
-    
+
+    # --- 5. Early Stopping Settings ---
     EPOCHS = 300
     patience = 30
     # min_delta = 1e-5
     best_val_loss = float('inf')
     early_stop_counter = 0
 
-    # --- Training Loop ---
+    # --- 5. Training Loop ---
     for epoch in range(EPOCHS):
+        # --- Training ---
         model.train()
         train_mse_total = 0.0
         for batch_X, batch_y in train_loader:
@@ -504,7 +486,9 @@ def objective(trial, save_dir):
             train_mse_total += loss.item()
 
         avg_train_mse = train_mse_total / len(train_loader)
+        # avg_train_rmse = math.sqrt(avg_train_mse)
 
+        # --- Validation ---
         model.eval()
         val_mse_total = 0.0
         with torch.no_grad():
@@ -515,7 +499,9 @@ def objective(trial, save_dir):
                 val_mse_total += v_loss.item()
 
         avg_val_mse = val_mse_total / len(val_loader)
+        # avg_val_rmse = math.sqrt(avg_val_mse)
 
+        # --- Early Stopping Logic ---
         # if avg_val_mse < best_val_loss - min_delta:
         if avg_val_mse < best_val_loss:
             best_val_loss = avg_val_mse
@@ -523,22 +509,29 @@ def objective(trial, save_dir):
         else:
             early_stop_counter += 1
 
-        print(f"⚠️ Trial {trial.number} Epoch [{epoch+1}/{EPOCHS}]")
+        print(f"⚠️Trial{[trial.number]} Epoch [{epoch+1}/{EPOCHS}]")
         print(f"  Train | Val -> MSE LOSS: {avg_train_mse:.4f} | {avg_val_mse:.4f}")
         print("-" * 30)
 
+        # Step the scheduler based on validation loss
         scheduler.step(avg_val_mse)
 
+        # Early stopping check
         if early_stop_counter >= patience:
             print(f"⏹ Early stopping triggered at epoch {epoch+1}")
             break
 
+        # Optuna pruning
         trial.report(avg_val_mse, epoch)
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
-    print(f"\nTrial {trial.number} Complete. Best Validation MSE: {best_val_loss:.4f}")
+    print(f"\nTraining Complete. Best Validation MSE: {best_val_loss:.4f}")
+
     return best_val_loss
+
+
+        
 
 def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
     # -----------------------------
@@ -559,21 +552,22 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
     # 1. Retrieve Best Hyperparameters
     # -----------------------------
     best_params = study.best_params
-    d_model = best_params["d_model"]
-    nhead = best_params["nhead"]
     num_layers = best_params["num_layers"]
-    dim_feedforward = best_params["dim_feedforward"]
     batch_size = best_params["batch_size"]
     initial_lr = best_params["lr"]
     weight_decay = best_params["weight_decay"]
     optimizer_name = best_params["optimizer"]
-    dropout = best_params["dropout"]
+    
+    # Reconstruct architecture lists
+    hidden_sizes = [best_params[f"layer_{i}_size"] for i in range(num_layers)]
+    dropouts = [best_params[f"layer_{i}_dropout"] for i in range(num_layers)]
+    
+    use_batchnorm = True if batch_size >= 32 else False
     
     print("\n" + "="*30)
     print(f"🚀 RETRAINING BEST MODEL (Trial {study.best_trial.number})")
     print(f"Optimizer: {optimizer_name} | Batch Size: {batch_size}")
-    print(f"d_model: {d_model}")
-    print(f"nhead: {nhead}")
+    print(f"Architecture: {hidden_sizes}")
     print("="*30)
     
     # -----------------------------
@@ -594,14 +588,12 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
     # -----------------------------
     # 3. Model Initialization
     # -----------------------------
-    model = TransformerModel(
+    model = MLPRegressor(
         input_size=INPUT_SIZE,
-        d_model=d_model,
-        nhead=nhead,
-        num_layers=num_layers,
-        dim_feedforward=dim_feedforward,
-        dropout=dropout,
-        output_size=OUTPUT_SIZE
+        output_size=OUTPUT_SIZE,
+        hidden_sizes=hidden_sizes,
+        dropouts=dropouts,
+        use_batchnorm=use_batchnorm
     ).to(DEVICE)
     
     # === Capture and Save Model Structure ===
@@ -642,7 +634,6 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
         momentum = best_params["sgd_momentum"]
         optimizer = torch.optim.SGD(model.parameters(), lr=initial_lr, weight_decay=weight_decay, momentum=momentum, nesterov=True)
 
-    # loss
     criterion = nn.MSELoss()
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -650,7 +641,7 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
         mode="min",
         factor=0.5,
         patience=20,
-        # min_lr=1e-6
+        min_lr=0#1e-6,
     )
 
     # -----------------------------
@@ -659,11 +650,13 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
     EPOCHS = 300
     patience = 30
     # min_delta = 1e-5
+
     best_val_loss = float("inf")
     best_epoch = 0
     early_stop_counter = 0
-    #
-    best_model_path = f"{save_dir}_final_model.pth"
+
+    best_model_path = f"{save_dir}/_final_model.pth"
+
     # -----------------------------
     # Loss tracking
     # -----------------------------
@@ -671,13 +664,16 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
     train_mse_list = []
     val_mse_list = []
 
-    # --- 5. Training Loop ---
+    # -----------------------------
+    # Training loop
+    # -----------------------------
     for epoch in range(EPOCHS):
-        # --- Training ---
         model.train()
         train_mse_total = 0.0
+
         for batch_X, batch_y in train_loader:
             batch_X, batch_y = batch_X.to(DEVICE), batch_y.to(DEVICE)
+
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
 
@@ -690,7 +686,6 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
         avg_train_mse = train_mse_total / len(train_loader)
         # avg_train_rmse = math.sqrt(avg_train_mse)
 
-        # --- Validation ---
         model.eval()
         val_mse_total = 0.0
         with torch.no_grad():
@@ -702,15 +697,15 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
 
         avg_val_mse = val_mse_total / len(val_loader)
         # avg_val_rmse = math.sqrt(avg_val_mse)
-        
+
         # Save losses
         epoch_list.append(epoch + 1)
         train_mse_list.append(avg_train_mse)
         val_mse_list.append(avg_val_mse)
-        
-        # --- Early Stopping Logic ---
+
+        # Early stopping logic
         # if avg_val_mse < best_val_loss - min_delta:
-        if avg_val_mse < best_val_loss:            
+        if avg_val_mse < best_val_loss:        
             best_val_loss = avg_val_mse
             best_epoch = epoch + 1
             early_stop_counter = 0
@@ -722,10 +717,8 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
         print(f"  Train | Val -> MSE LOSS: {avg_train_mse:.4f} | {avg_val_mse:.4f}")
         print("-" * 30)
 
-        # Step the scheduler based on validation loss
         scheduler.step(avg_val_mse)
 
-        # Early stopping check
         if early_stop_counter >= patience:
             print(f"⏹ Early stopping triggered at epoch {epoch+1}")
             break
@@ -784,16 +777,16 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
     plt.xlim(0, rounded_top)
 
     # # Adjust the size of x and y axis tick labels
-    plt.xticks(ticks=np.arange(0, rounded_top+1, 20),fontsize=4 * scale_factor, rotation=0)
+    plt.xticks(ticks=np.arange(0, rounded_top+1, 10),fontsize=4 * scale_factor, rotation=0)
     
     plt.xlabel("Epoch", fontsize=4* scale_factor)
     plt.ylabel("MSE", fontsize=4* scale_factor)
     # plt.title("Training & Validation Loss", fontsize=4* scale_factor)
-    plt.legend(frameon=False, fontsize=3* scale_factor, loc='upper right')
+    plt.legend(frameon=False, fontsize=3* scale_factor)
     # plt.grid(True)
 
     plot_path = f"{save_dir}/re_training_val_loss.png"
-    plt.savefig(plot_path, dpi=600, pad_inches=0.02, bbox_inches='tight')
+    plt.savefig(plot_path, dpi=300, pad_inches=0.02, bbox_inches='tight')
     plt.close()
 
     # -----------------------------
@@ -806,6 +799,7 @@ def retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, save_dir):
     print(f"📊 Loss plot saved to: {plot_path}")
 
     return model
+
 
 
 # define rRMSE func
@@ -847,7 +841,7 @@ def evaluate_and_plot(final_model, data_tensor, feature_scaler, target_scaler, t
     test_loader = DataLoader(
         data_tensor,
         batch_size=128,
-        shuffle=True
+        shuffle=False
     )
 
     y_pred_list = []
@@ -1018,8 +1012,8 @@ def plot_optuna_results(study, save_dir, width=500, height=500):
     
     return
 
-
-def compute_and_plot_shap(final_model, X_train_tensor, cols, timestamp, save_dir):
+# SHAP based feature importance 
+def compute_and_plot_shap(final_model, X_train_tensor, cols, save_dir):
     """
     Compute and plot SHAP values with automatic GPU/CPU selection.
     
@@ -1028,185 +1022,119 @@ def compute_and_plot_shap(final_model, X_train_tensor, cols, timestamp, save_dir
     X_train_tensor: X_train_tensor
     save_dir (str): Directory to save the output files
     """
-    import numpy as np
-    import pandas as pd
-    import torch
-    import shap
-    import matplotlib.pyplot as plt
-
-    DEVICE = next(final_model.parameters()).device
-
-    # -----------------------------
-    # Model setup
-    # -----------------------------
-    old_cudnn = torch.backends.cudnn.enabled
-    old_mode = final_model.training
-
-    torch.backends.cudnn.enabled = False
-    final_model.eval()
-
-    # -----------------------------
-    # Background samples
-    # -----------------------------
+    # random select certain samples in X_train_tensor as background
     idx = torch.randperm(X_train_tensor.size(0))[:100]
     background = X_train_tensor[idx].to(DEVICE)
+    final_model.eval()
+    explainer = shap.GradientExplainer(final_model,background)
+   
+    # Compute SHAP values
+    # How much did each input feature contribute to the model output?
+    shap_values_array = explainer.shap_values(X_train_tensor.to(DEVICE))
+    print(f"🚀shap_values_array.shape: {shap_values_array.shape}")
+    print(shap_values_array)
+    
+    # Decide which slice to use for 2D plots (bar / violin / beeswarm)
+    if isinstance(shap_values_array, list):
+        # multi-output → pick one (e.g. class 0, or the positive class, etc.)
+        shap_2d = shap_values_array[0]           # ← adjust index as needed
+    elif len(shap_values_array.shape) == 3:
+        # shape = (samples, features, outputs) → pick one output
+        shap_2d = shap_values_array[:, :, 0]     # or .mean(axis=2), etc.
+    else:
+        # already 2D: (samples, features)
+        shap_2d = shap_values_array
+    print(f"🚀shap_2d.shape: {shap_2d.shape}")
+    print(shap_2d)
 
-    # -----------------------------
-    # SHAP computation
-    # -----------------------------
-    explainer = shap.GradientExplainer(final_model, background)
-    shap_values = explainer.shap_values(X_train_tensor.to(DEVICE))
-
-    shap_values = np.array(shap_values)
-    shap_values = np.squeeze(shap_values)
-
-    if shap_values.ndim != 3:
-        raise ValueError(f"Expected SHAP shape (N, T, F), got {shap_values.shape}")
-
-    N, T, F = shap_values.shape
-    print(f"✅ SHAP shape: (samples={N}, timesteps={T}, features={F})")
-
-    # Restore model state
-    torch.backends.cudnn.enabled = old_cudnn
-    final_model.train() if old_mode else final_model.eval()
-
-    # Convert input data
+    # This is the original input data, converted to NumPy
     data_np = X_train_tensor.detach().cpu().numpy()
+    print(f"🚀data_np.shape: {data_np.shape}")
+    print(data_np)
     
-    # ============================================================
-    #  timestamp setting
-    # ============================================================
-    mapping = {
-        2: ["Semiannual1", "Semiannual2"],
-        4: ["Q1", "Q2", "Q3", "Q4"],
-        12: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    }
+    # object: Rich wrapper that bundles SHAP values (shap_2d), original data (data_np), feature names
+    # Modern SHAP plotting API expects this object: shap.plots.bar(), .beeswarm(), .violin() etc.
+    shap_values = shap.Explanation(
+        values=shap_2d,
+        data=data_np,
+        feature_names=cols)
+    print(f"🚀shap_values.shape: {shap_values.shape}")
+    print(shap_values)
     
-    if timestamp in mapping:
-        timestep_names = mapping[timestamp]
-        # This creates the list by iterating through timesteps first, then columns
-        expanded_cols = [f"{c}_{timestep_names[t]}" for t in range(T) for c in cols]
-    
-    # ============================================================
-    # 1️⃣ FEATURE IMPORTANCE (125 features)
-    # Aggregate over time
-    # ============================================================
-    shap_feature = np.mean(shap_values, axis=1)     # (N, F)
-    data_feature = np.mean(data_np, axis=1)         # (N, F)
+    # Convert SHAP values to a DataFrame for saving
+    shap_df = pd.DataFrame(shap_2d, columns=cols)
+    shap_df.to_csv(f"{save_dir}shap_values.csv", index=False)
+    print("\nSHAP values saved to CSV successfully!")
 
-    shap_exp_feature = shap.Explanation(
-        values=shap_feature,
-        data=data_feature,
-        feature_names=cols
-    )
-    
-    max_display_F = len(cols)
-    
-    plt.figure(figsize=(4, max(1, max_display_F * 0.3)))
-    shap.plots.beeswarm(shap_exp_feature, max_display=max_display_F, show=False)
+    # Set the max_display based on feature count
+    max_display = min(64, X_train_tensor.shape[1])
+
+    # Create and save the SHAP bar plot
+    fig_bar = plt.figure(figsize=(4, max(1, max_display * 0.3)))
+    shap.plots.bar(shap_values, max_display=max_display, show=False)
+    plt.xlabel("Mean |SHAP value|", fontsize=23)  # Adjust x-axis label size
+    plt.xticks(fontsize=21)
+    plt.yticks(fontsize=22)
+    fig_bar.savefig(f"{save_dir}shap_bar.png", dpi=600, bbox_inches='tight')
+    plt.close(fig_bar)
+
+    ###
+    ### In modern SHAP: Beeswarm = summary plot
+    ### There is no need for summary_plot
+    # # Create and save the SHAP summary plot
+    # fig_summary_plot = plt.figure(figsize=(4, max(1, max_display * 0.3)))
+    # shap.summary_plot(shap_values, max_display=max_display, show=False)
+    # # Get the colorbar's axis object
+    # cbar = plt.gcf().axes[-1]
+    # cbar.tick_params(labelsize=23)
+    # cbar.tick_params(direction='out', length=6, width=2, grid_alpha=0.5)
+    # # Set the label for the colorbar with a larger font size
+    # cbar.set_ylabel("Feature value", fontsize=23,labelpad=-40)
+    # plt.xlabel('SHAP value (Impact on model output)', fontsize=20)  # Adjust x-axis label size
+    # plt.xticks(fontsize=21)
+    # plt.yticks(fontsize=22)    
+    # fig_summary_plot.savefig(f"{save_dir}shap_summary_plot.png", dpi=600, bbox_inches='tight')
+    # plt.close(fig_summary_plot)
+
+    # Create and save the SHAP violin plot
+    fig_violin = plt.figure(figsize=(4, max(1, max_display * 0.3)))
+    shap.plots.violin(shap_values, max_display=max_display, show=False)
     # Get the colorbar's axis object
     cbar = plt.gcf().axes[-1]
-    cbar.tick_params(labelsize=20)
+    cbar.tick_params(labelsize=23)
     cbar.tick_params(direction='out', length=6, width=2, grid_alpha=0.5)
     # Set the label for the colorbar with a larger font size
-    cbar.set_ylabel("Feature value", fontsize=20,labelpad=-40)
+    cbar.set_ylabel("Feature value", fontsize=23,labelpad=-40)
     plt.xlabel('SHAP value (Impact on model output)', fontsize=20)  # Adjust x-axis label size
-    plt.xticks(fontsize=20)
-    plt.yticks(fontsize=20)  
-    # plt.title("Feature Importance (Aggregated over time)")
-    plt.savefig(f"{save_dir}shap_beeswarm_feature.png", dpi=600, bbox_inches='tight')
-    plt.close()
+    plt.xticks(fontsize=21)
+    plt.yticks(fontsize=22)    
+    fig_violin.savefig(f"{save_dir}shap_violin.png", dpi=600, bbox_inches='tight')
+    plt.close(fig_violin)
 
-    # Save CSV (mean |SHAP|)
-    feature_importance = np.mean(np.abs(shap_feature), axis=0)
-    pd.DataFrame({
-        "feature": cols,
-        "importance": feature_importance
-    }).sort_values("importance", ascending=False)\
-     .to_csv(f"{save_dir}shap_feature_importance.csv", index=False)
-
-    print("✅ Feature beeswarm saved")
-
-    # ============================================================
-    # 2️⃣ TIME-STEP IMPORTANCE (2 steps)
-    # Aggregate over features
-    # ============================================================
-    shap_time = np.mean(shap_values, axis=2)   # (N, T)
-    data_time = np.mean(data_np, axis=2)       # (N, T)
-
-    shap_exp_time = shap.Explanation(
-        values=shap_time,
-        data=data_time,
-        feature_names=timestep_names
-    )
-    
-    max_display_T = len(timestep_names)
-    
-    plt.figure(figsize=(4, max(1, max_display_T * 0.3)))
-    shap.plots.beeswarm(shap_exp_time, max_display=max_display_T, show=False)
+    # Create and save the SHAP beeswarm plot
+    fig_beeswarm = plt.figure(figsize=(4, max(1, max_display * 0.3)))
+    shap.plots.beeswarm(shap_values, max_display=max_display, show=False)
     # Get the colorbar's axis object
     cbar = plt.gcf().axes[-1]
-    # Make colorbar visibly thicker
-    # cbar.set_aspect(20)                 
-    cbar.set_box_aspect(20)
-    cbar.tick_params(labelsize=15)
+    cbar.tick_params(labelsize=23)
     cbar.tick_params(direction='out', length=6, width=2, grid_alpha=0.5)
     # Set the label for the colorbar with a larger font size
-    cbar.set_ylabel("Feature value", fontsize=15, labelpad=-20)
+    cbar.set_ylabel("Feature value", fontsize=23,labelpad=-40)
     plt.xlabel('SHAP value (Impact on model output)', fontsize=20)  # Adjust x-axis label size
-    plt.xticks(fontsize=20, rotation=90)
-    plt.yticks(fontsize=20)      
-    # plt.title("Time-step Importance")
-    plt.savefig(f"{save_dir}shap_beeswarm_timestep.png", dpi=600, bbox_inches='tight')
-    plt.close()
+    plt.xticks(fontsize=21)
+    plt.yticks(fontsize=22)    
+    fig_beeswarm.savefig(f"{save_dir}shap_beeswarm.png", dpi=600, bbox_inches='tight')
+    plt.close(fig_beeswarm)
 
-    # Save CSV
-    time_importance = np.mean(np.abs(shap_time), axis=0)
-    pd.DataFrame({
-        "timestep": timestep_names,
-        "importance": time_importance
-    }).to_csv(f"{save_dir}shap_timestep_importance.csv", index=False)
-
-    print("✅ Time-step beeswarm saved")
-
-    # ============================================================
-    # 3️⃣ OPTIONAL: Full 250-feature beeswarm (advanced)
-    # ============================================================
-    shap_flat = shap_values.reshape(N, T * F)
-    data_flat = data_np.reshape(N, T * F)
-
-    shap_exp_full = shap.Explanation(
-        values=shap_flat,
-        data=data_flat,
-        feature_names=expanded_cols
-    )
-
-    max_display_Full =  min(125, len(expanded_cols))
+    print("\nSHAP plots saved successfully!")
     
-    plt.figure(figsize=(4, max(1, max_display_Full * 0.3)))
-    shap.plots.beeswarm(shap_exp_full, max_display=max_display_Full, show=False)
-    # Get the colorbar's axis object
-    cbar = plt.gcf().axes[-1]
-    cbar.tick_params(labelsize=20)
-    cbar.tick_params(direction='out', length=6, width=2, grid_alpha=0.5)
-    # Set the label for the colorbar with a larger font size
-    cbar.set_ylabel("Feature value", fontsize=20,labelpad=-40)
-    plt.xlabel('SHAP value (Impact on model output)', fontsize=20)  # Adjust x-axis label size
-    plt.xticks(fontsize=20)
-    plt.yticks(fontsize=20)   
-    # plt.title("Full SHAP (Feature × Time)")
-    plt.savefig(f"{save_dir}shap_beeswarm_full.png", dpi=600, bbox_inches='tight')
-    plt.close()
-
-    print("✅ Full beeswarm saved")
-
     return
+    
 
-
-# execution 
+# execution 1 time
 if __name__ == "__main__":
 
-    def create_directory(base_path = "../run/ssp/attention/before_boruta/month/"):
+    def create_directory(base_path = "../run/ssp/mlp/before_boruta/month/"):
     
         counter = 0
     
@@ -1220,151 +1148,223 @@ if __name__ == "__main__":
         return new_directory
 
     directory = create_directory()
-   
+
     # define columns in model training
-    cols =[
-           'S1_RVI', 'S1_VH+VV', 'S1_VH-VV', 'S1_VH/VV', 
-           'S1_VH', 
-           'S1_VH_asm', 'S1_VH_con', 'S1_VH_corr', 'S1_VH_dent', 'S1_VH_diss', 'S1_VH_dvar', 'S1_VH_ent', 'S1_VH_homo', 'S1_VH_imcorr1', 'S1_VH_imcorr2', 
-           'S1_VH_inertia', 'S1_VH_prom', 'S1_VH_savg', 'S1_VH_sent', 'S1_VH_shade', 'S1_VH_svar', 'S1_VH_var', 
-           'S1_VV', 
-           'S1_VV_asm', 'S1_VV_con', 'S1_VV_corr', 'S1_VV_dent', 'S1_VV_diss', 'S1_VV_dvar', 'S1_VV_ent', 'S1_VV_homo', 'S1_VV_imcorr1', 'S1_VV_imcorr2', 
-           'S1_VV_inertia', 'S1_VV_prom', 'S1_VV_savg', 'S1_VV_sent', 'S1_VV_shade', 'S1_VV_svar', 'S1_VV_var', 
-           'S2_B2', 'S2_B3', 'S2_B4', 'S2_B5', 'S2_B6', 'S2_B7', 'S2_B8', 'S2_B8A', 'S2_B11', 'S2_B12',
-           'S2_CIgreen', 'S2_CIre', 'S2_DVI', 'S2_EVI1', 'S2_EVI2', 'S2_EVIre1', 'S2_EVIre2', 'S2_EVIre3', 'S2_GNDVI', 'S2_IRECI', 
-           'S2_MCARI1', 'S2_MCARI2', 'S2_MCARI3', 'S2_MTCI1', 'S2_MTCI2', 'S2_MTCI3', 'S2_NDI45', 'S2_NDRE1', 'S2_NDRE2', 'S2_NDRE3', 
-           'S2_NDVI56', 'S2_NDVI57', 'S2_NDVI68a', 'S2_NDVI78a', 'S2_NDWI1', 'S2_NDWI2', 'S2_NIRv', 'S2_NLI', 'S2_OSAVI', 'S2_PSSRa', 'S2_SAVI', 'S2_SR', 'S2_kNDVI', 
-           'P2_HH+HV', 'P2_HH-HV', 
-           'P2_HH', 
-           'P2_HH_asm', 'P2_HH_con', 'P2_HH_corr', 'P2_HH_dent', 'P2_HH_diss', 'P2_HH_dvar', 'P2_HH_ent', 'P2_HH_homo', 'P2_HH_imcorr1', 'P2_HH_imcorr2', 
-           'P2_HH_inertia', 'P2_HH_prom', 'P2_HH_savg', 'P2_HH_sent', 'P2_HH_shade', 'P2_HH_svar', 'P2_HH_var', 
-           'P2_HV/HH', 'P2_HV', 
-           'P2_HV_asm', 'P2_HV_con', 'P2_HV_corr', 'P2_HV_dent', 'P2_HV_diss', 'P2_HV_dvar', 'P2_HV_ent', 'P2_HV_homo', 'P2_HV_imcorr1', 'P2_HV_imcorr2', 
-           'P2_HV_inertia', 'P2_HV_prom', 'P2_HV_savg', 'P2_HV_sent', 'P2_HV_shade', 'P2_HV_svar', 'P2_HV_var', 
-           'Aspect', 'Ele', 'Slope'
-          ]
-    
+    cols = [ 'Aspect', 'Ele', 'Slope',
+             'S1_RVI_Jan', 'S1_RVI_Feb', 'S1_RVI_Mar', 'S1_RVI_Apr', 'S1_RVI_May', 'S1_RVI_Jun', 'S1_RVI_Jul', 'S1_RVI_Aug', 'S1_RVI_Sep', 'S1_RVI_Oct', 'S1_RVI_Nov', 'S1_RVI_Dec', 
+             'S1_VH+VV_Jan', 'S1_VH+VV_Feb', 'S1_VH+VV_Mar', 'S1_VH+VV_Apr', 'S1_VH+VV_May', 'S1_VH+VV_Jun', 'S1_VH+VV_Jul', 'S1_VH+VV_Aug', 'S1_VH+VV_Sep', 'S1_VH+VV_Oct', 'S1_VH+VV_Nov', 'S1_VH+VV_Dec', 
+             'S1_VH-VV_Jan', 'S1_VH-VV_Feb', 'S1_VH-VV_Mar', 'S1_VH-VV_Apr', 'S1_VH-VV_May', 'S1_VH-VV_Jun', 'S1_VH-VV_Jul', 'S1_VH-VV_Aug', 'S1_VH-VV_Sep', 'S1_VH-VV_Oct', 'S1_VH-VV_Nov', 'S1_VH-VV_Dec', 
+             'S1_VH/VV_Jan', 'S1_VH/VV_Feb', 'S1_VH/VV_Mar', 'S1_VH/VV_Apr', 'S1_VH/VV_May', 'S1_VH/VV_Jun', 'S1_VH/VV_Jul', 'S1_VH/VV_Aug', 'S1_VH/VV_Sep', 'S1_VH/VV_Oct', 'S1_VH/VV_Nov', 'S1_VH/VV_Dec',
+             'S1_VH_Jan', 'S1_VH_Feb', 'S1_VH_Mar', 'S1_VH_Apr', 'S1_VH_May', 'S1_VH_Jun', 'S1_VH_Jul', 'S1_VH_Aug', 'S1_VH_Sep', 'S1_VH_Oct', 'S1_VH_Nov', 'S1_VH_Dec', 
+             'S1_VH_asm_Jan', 'S1_VH_asm_Feb', 'S1_VH_asm_Mar', 'S1_VH_asm_Apr', 'S1_VH_asm_May', 'S1_VH_asm_Jun', 'S1_VH_asm_Jul', 'S1_VH_asm_Aug', 'S1_VH_asm_Sep', 'S1_VH_asm_Oct', 'S1_VH_asm_Nov', 'S1_VH_asm_Dec', 
+             'S1_VH_con_Jan', 'S1_VH_con_Feb', 'S1_VH_con_Mar', 'S1_VH_con_Apr', 'S1_VH_con_May', 'S1_VH_con_Jun', 'S1_VH_con_Jul', 'S1_VH_con_Aug', 'S1_VH_con_Sep', 'S1_VH_con_Oct', 'S1_VH_con_Nov', 'S1_VH_con_Dec',
+             'S1_VH_corr_Jan', 'S1_VH_corr_Feb', 'S1_VH_corr_Mar', 'S1_VH_corr_Apr', 'S1_VH_corr_May', 'S1_VH_corr_Jun', 'S1_VH_corr_Jul', 'S1_VH_corr_Aug', 'S1_VH_corr_Sep', 'S1_VH_corr_Oct', 'S1_VH_corr_Nov', 'S1_VH_corr_Dec', 
+             'S1_VH_dent_Jan', 'S1_VH_dent_Feb', 'S1_VH_dent_Mar', 'S1_VH_dent_Apr', 'S1_VH_dent_May', 'S1_VH_dent_Jun', 'S1_VH_dent_Jul', 'S1_VH_dent_Aug', 'S1_VH_dent_Sep', 'S1_VH_dent_Oct', 'S1_VH_dent_Nov', 'S1_VH_dent_Dec', 
+             'S1_VH_diss_Jan', 'S1_VH_diss_Feb', 'S1_VH_diss_Mar', 'S1_VH_diss_Apr', 'S1_VH_diss_May', 'S1_VH_diss_Jun', 'S1_VH_diss_Jul', 'S1_VH_diss_Aug', 'S1_VH_diss_Sep', 'S1_VH_diss_Oct', 'S1_VH_diss_Nov', 'S1_VH_diss_Dec',
+             'S1_VH_dvar_Jan', 'S1_VH_dvar_Feb', 'S1_VH_dvar_Mar', 'S1_VH_dvar_Apr', 'S1_VH_dvar_May', 'S1_VH_dvar_Jun', 'S1_VH_dvar_Jul', 'S1_VH_dvar_Aug', 'S1_VH_dvar_Sep', 'S1_VH_dvar_Oct', 'S1_VH_dvar_Nov', 'S1_VH_dvar_Dec',
+             'S1_VH_ent_Jan', 'S1_VH_ent_Feb', 'S1_VH_ent_Mar', 'S1_VH_ent_Apr', 'S1_VH_ent_May', 'S1_VH_ent_Jun', 'S1_VH_ent_Jul', 'S1_VH_ent_Aug', 'S1_VH_ent_Sep', 'S1_VH_ent_Oct', 'S1_VH_ent_Nov', 'S1_VH_ent_Dec',
+             'S1_VH_homo_Jan', 'S1_VH_homo_Feb', 'S1_VH_homo_Mar', 'S1_VH_homo_Apr', 'S1_VH_homo_May', 'S1_VH_homo_Jun', 'S1_VH_homo_Jul', 'S1_VH_homo_Aug', 'S1_VH_homo_Sep', 'S1_VH_homo_Oct', 'S1_VH_homo_Nov', 'S1_VH_homo_Dec', 
+             'S1_VH_imcorr1_Jan', 'S1_VH_imcorr1_Feb', 'S1_VH_imcorr1_Mar', 'S1_VH_imcorr1_Apr', 'S1_VH_imcorr1_May', 'S1_VH_imcorr1_Jun', 'S1_VH_imcorr1_Jul', 'S1_VH_imcorr1_Aug', 'S1_VH_imcorr1_Sep', 'S1_VH_imcorr1_Oct', 'S1_VH_imcorr1_Nov', 'S1_VH_imcorr1_Dec', 
+             'S1_VH_imcorr2_Jan', 'S1_VH_imcorr2_Feb', 'S1_VH_imcorr2_Mar', 'S1_VH_imcorr2_Apr', 'S1_VH_imcorr2_May', 'S1_VH_imcorr2_Jun', 'S1_VH_imcorr2_Jul', 'S1_VH_imcorr2_Aug', 'S1_VH_imcorr2_Sep', 'S1_VH_imcorr2_Oct', 'S1_VH_imcorr2_Nov', 'S1_VH_imcorr2_Dec',
+             'S1_VH_inertia_Jan', 'S1_VH_inertia_Feb', 'S1_VH_inertia_Mar', 'S1_VH_inertia_Apr', 'S1_VH_inertia_May', 'S1_VH_inertia_Jun', 'S1_VH_inertia_Jul', 'S1_VH_inertia_Aug', 'S1_VH_inertia_Sep', 'S1_VH_inertia_Oct', 'S1_VH_inertia_Nov', 'S1_VH_inertia_Dec', 
+             'S1_VH_prom_Jan', 'S1_VH_prom_Feb', 'S1_VH_prom_Mar', 'S1_VH_prom_Apr', 'S1_VH_prom_May', 'S1_VH_prom_Jun', 'S1_VH_prom_Jul', 'S1_VH_prom_Aug', 'S1_VH_prom_Sep', 'S1_VH_prom_Oct', 'S1_VH_prom_Nov', 'S1_VH_prom_Dec',
+             'S1_VH_savg_Jan', 'S1_VH_savg_Feb', 'S1_VH_savg_Mar', 'S1_VH_savg_Apr', 'S1_VH_savg_May', 'S1_VH_savg_Jun', 'S1_VH_savg_Jul', 'S1_VH_savg_Aug', 'S1_VH_savg_Sep', 'S1_VH_savg_Oct', 'S1_VH_savg_Nov', 'S1_VH_savg_Dec', 
+             'S1_VH_sent_Jan', 'S1_VH_sent_Feb', 'S1_VH_sent_Mar', 'S1_VH_sent_Apr', 'S1_VH_sent_May', 'S1_VH_sent_Jun', 'S1_VH_sent_Jul', 'S1_VH_sent_Aug', 'S1_VH_sent_Sep', 'S1_VH_sent_Oct', 'S1_VH_sent_Nov', 'S1_VH_sent_Dec', 
+             'S1_VH_shade_Jan', 'S1_VH_shade_Feb', 'S1_VH_shade_Mar', 'S1_VH_shade_Apr', 'S1_VH_shade_May', 'S1_VH_shade_Jun', 'S1_VH_shade_Jul', 'S1_VH_shade_Aug', 'S1_VH_shade_Sep', 'S1_VH_shade_Oct', 'S1_VH_shade_Nov', 'S1_VH_shade_Dec', 
+             'S1_VH_svar_Jan', 'S1_VH_svar_Feb', 'S1_VH_svar_Mar', 'S1_VH_svar_Apr', 'S1_VH_svar_May', 'S1_VH_svar_Jun', 'S1_VH_svar_Jul', 'S1_VH_svar_Aug', 'S1_VH_svar_Sep', 'S1_VH_svar_Oct', 'S1_VH_svar_Nov', 'S1_VH_svar_Dec',
+             'S1_VH_var_Jan', 'S1_VH_var_Feb', 'S1_VH_var_Mar', 'S1_VH_var_Apr', 'S1_VH_var_May', 'S1_VH_var_Jun', 'S1_VH_var_Jul', 'S1_VH_var_Aug', 'S1_VH_var_Sep', 'S1_VH_var_Oct', 'S1_VH_var_Nov', 'S1_VH_var_Dec', 
+             'S1_VV_Jan', 'S1_VV_Feb', 'S1_VV_Mar', 'S1_VV_Apr', 'S1_VV_May', 'S1_VV_Jun', 'S1_VV_Jul', 'S1_VV_Aug', 'S1_VV_Sep', 'S1_VV_Oct', 'S1_VV_Nov', 'S1_VV_Dec', 
+             'S1_VV_asm_Jan', 'S1_VV_asm_Feb', 'S1_VV_asm_Mar', 'S1_VV_asm_Apr', 'S1_VV_asm_May', 'S1_VV_asm_Jun', 'S1_VV_asm_Jul', 'S1_VV_asm_Aug', 'S1_VV_asm_Sep', 'S1_VV_asm_Oct', 'S1_VV_asm_Nov', 'S1_VV_asm_Dec',
+             'S1_VV_con_Jan', 'S1_VV_con_Feb', 'S1_VV_con_Mar', 'S1_VV_con_Apr', 'S1_VV_con_May', 'S1_VV_con_Jun', 'S1_VV_con_Jul', 'S1_VV_con_Aug', 'S1_VV_con_Sep', 'S1_VV_con_Oct', 'S1_VV_con_Nov', 'S1_VV_con_Dec',
+             'S1_VV_corr_Jan', 'S1_VV_corr_Feb', 'S1_VV_corr_Mar', 'S1_VV_corr_Apr', 'S1_VV_corr_May', 'S1_VV_corr_Jun', 'S1_VV_corr_Jul', 'S1_VV_corr_Aug', 'S1_VV_corr_Sep', 'S1_VV_corr_Oct', 'S1_VV_corr_Nov', 'S1_VV_corr_Dec', 
+             'S1_VV_dent_Jan', 'S1_VV_dent_Feb', 'S1_VV_dent_Mar', 'S1_VV_dent_Apr', 'S1_VV_dent_May', 'S1_VV_dent_Jun', 'S1_VV_dent_Jul', 'S1_VV_dent_Aug', 'S1_VV_dent_Sep', 'S1_VV_dent_Oct', 'S1_VV_dent_Nov', 'S1_VV_dent_Dec', 
+             'S1_VV_diss_Jan', 'S1_VV_diss_Feb', 'S1_VV_diss_Mar', 'S1_VV_diss_Apr', 'S1_VV_diss_May', 'S1_VV_diss_Jun', 'S1_VV_diss_Jul', 'S1_VV_diss_Aug', 'S1_VV_diss_Sep', 'S1_VV_diss_Oct', 'S1_VV_diss_Nov', 'S1_VV_diss_Dec', 
+             'S1_VV_dvar_Jan', 'S1_VV_dvar_Feb', 'S1_VV_dvar_Mar', 'S1_VV_dvar_Apr', 'S1_VV_dvar_May', 'S1_VV_dvar_Jun', 'S1_VV_dvar_Jul', 'S1_VV_dvar_Aug', 'S1_VV_dvar_Sep', 'S1_VV_dvar_Oct', 'S1_VV_dvar_Nov', 'S1_VV_dvar_Dec',
+             'S1_VV_ent_Jan', 'S1_VV_ent_Feb', 'S1_VV_ent_Mar', 'S1_VV_ent_Apr', 'S1_VV_ent_May', 'S1_VV_ent_Jun', 'S1_VV_ent_Jul', 'S1_VV_ent_Aug', 'S1_VV_ent_Sep', 'S1_VV_ent_Oct', 'S1_VV_ent_Nov', 'S1_VV_ent_Dec', 
+             'S1_VV_homo_Jan', 'S1_VV_homo_Feb', 'S1_VV_homo_Mar', 'S1_VV_homo_Apr', 'S1_VV_homo_May', 'S1_VV_homo_Jun', 'S1_VV_homo_Jul', 'S1_VV_homo_Aug', 'S1_VV_homo_Sep', 'S1_VV_homo_Oct', 'S1_VV_homo_Nov', 'S1_VV_homo_Dec', 
+             'S1_VV_imcorr1_Jan', 'S1_VV_imcorr1_Feb', 'S1_VV_imcorr1_Mar', 'S1_VV_imcorr1_Apr', 'S1_VV_imcorr1_May', 'S1_VV_imcorr1_Jun', 'S1_VV_imcorr1_Jul', 'S1_VV_imcorr1_Aug', 'S1_VV_imcorr1_Sep', 'S1_VV_imcorr1_Oct', 'S1_VV_imcorr1_Nov', 'S1_VV_imcorr1_Dec', 
+             'S1_VV_imcorr2_Jan', 'S1_VV_imcorr2_Feb', 'S1_VV_imcorr2_Mar', 'S1_VV_imcorr2_Apr', 'S1_VV_imcorr2_May', 'S1_VV_imcorr2_Jun', 'S1_VV_imcorr2_Jul', 'S1_VV_imcorr2_Aug', 'S1_VV_imcorr2_Sep', 'S1_VV_imcorr2_Oct', 'S1_VV_imcorr2_Nov', 'S1_VV_imcorr2_Dec',
+             'S1_VV_inertia_Jan', 'S1_VV_inertia_Feb', 'S1_VV_inertia_Mar', 'S1_VV_inertia_Apr', 'S1_VV_inertia_May', 'S1_VV_inertia_Jun', 'S1_VV_inertia_Jul', 'S1_VV_inertia_Aug', 'S1_VV_inertia_Sep', 'S1_VV_inertia_Oct', 'S1_VV_inertia_Nov', 'S1_VV_inertia_Dec', 
+             'S1_VV_prom_Jan', 'S1_VV_prom_Feb', 'S1_VV_prom_Mar', 'S1_VV_prom_Apr', 'S1_VV_prom_May', 'S1_VV_prom_Jun', 'S1_VV_prom_Jul', 'S1_VV_prom_Aug', 'S1_VV_prom_Sep', 'S1_VV_prom_Oct', 'S1_VV_prom_Nov', 'S1_VV_prom_Dec', 
+             'S1_VV_savg_Jan', 'S1_VV_savg_Feb', 'S1_VV_savg_Mar', 'S1_VV_savg_Apr', 'S1_VV_savg_May', 'S1_VV_savg_Jun', 'S1_VV_savg_Jul', 'S1_VV_savg_Aug', 'S1_VV_savg_Sep', 'S1_VV_savg_Oct', 'S1_VV_savg_Nov', 'S1_VV_savg_Dec', 
+             'S1_VV_sent_Jan', 'S1_VV_sent_Feb', 'S1_VV_sent_Mar', 'S1_VV_sent_Apr', 'S1_VV_sent_May', 'S1_VV_sent_Jun', 'S1_VV_sent_Jul', 'S1_VV_sent_Aug', 'S1_VV_sent_Sep', 'S1_VV_sent_Oct', 'S1_VV_sent_Nov', 'S1_VV_sent_Dec',
+             'S1_VV_shade_Jan', 'S1_VV_shade_Feb', 'S1_VV_shade_Mar', 'S1_VV_shade_Apr', 'S1_VV_shade_May', 'S1_VV_shade_Jun', 'S1_VV_shade_Jul', 'S1_VV_shade_Aug', 'S1_VV_shade_Sep', 'S1_VV_shade_Oct', 'S1_VV_shade_Nov', 'S1_VV_shade_Dec',
+             'S1_VV_svar_Jan', 'S1_VV_svar_Feb', 'S1_VV_svar_Mar', 'S1_VV_svar_Apr', 'S1_VV_svar_May', 'S1_VV_svar_Jun', 'S1_VV_svar_Jul', 'S1_VV_svar_Aug', 'S1_VV_svar_Sep', 'S1_VV_svar_Oct', 'S1_VV_svar_Nov', 'S1_VV_svar_Dec', 
+             'S1_VV_var_Jan', 'S1_VV_var_Feb', 'S1_VV_var_Mar', 'S1_VV_var_Apr', 'S1_VV_var_May', 'S1_VV_var_Jun', 'S1_VV_var_Jul', 'S1_VV_var_Aug', 'S1_VV_var_Sep', 'S1_VV_var_Oct', 'S1_VV_var_Nov', 'S1_VV_var_Dec', 
+             
+             'S2_B2_Jan', 'S2_B2_Feb', 'S2_B2_Mar', 'S2_B2_Apr', 'S2_B2_May', 'S2_B2_Jun', 'S2_B2_Jul', 'S2_B2_Aug', 'S2_B2_Sep', 'S2_B2_Oct', 'S2_B2_Nov', 'S2_B2_Dec', 
+             'S2_B3_Jan', 'S2_B3_Feb', 'S2_B3_Mar', 'S2_B3_Apr', 'S2_B3_May', 'S2_B3_Jun', 'S2_B3_Jul', 'S2_B3_Aug', 'S2_B3_Sep', 'S2_B3_Oct', 'S2_B3_Nov', 'S2_B3_Dec', 
+             'S2_B4_Jan', 'S2_B4_Feb', 'S2_B4_Mar', 'S2_B4_Apr', 'S2_B4_May', 'S2_B4_Jun', 'S2_B4_Jul', 'S2_B4_Aug', 'S2_B4_Sep', 'S2_B4_Oct', 'S2_B4_Nov', 'S2_B4_Dec', 
+             'S2_B5_Jan', 'S2_B5_Feb', 'S2_B5_Mar', 'S2_B5_Apr', 'S2_B5_May', 'S2_B5_Jun', 'S2_B5_Jul', 'S2_B5_Aug', 'S2_B5_Sep', 'S2_B5_Oct', 'S2_B5_Nov', 'S2_B5_Dec',
+             'S2_B6_Jan', 'S2_B6_Feb', 'S2_B6_Mar', 'S2_B6_Apr', 'S2_B6_May', 'S2_B6_Jun', 'S2_B6_Jul', 'S2_B6_Aug', 'S2_B6_Sep', 'S2_B6_Oct', 'S2_B6_Nov', 'S2_B6_Dec',
+             'S2_B7_Jan', 'S2_B7_Feb', 'S2_B7_Mar', 'S2_B7_Apr', 'S2_B7_May', 'S2_B7_Jun', 'S2_B7_Jul', 'S2_B7_Aug', 'S2_B7_Sep', 'S2_B7_Oct', 'S2_B7_Nov', 'S2_B7_Dec', 
+             'S2_B8_Jan', 'S2_B8_Feb', 'S2_B8_Mar', 'S2_B8_Apr', 'S2_B8_May', 'S2_B8_Jun', 'S2_B8_Jul', 'S2_B8_Aug', 'S2_B8_Sep', 'S2_B8_Oct', 'S2_B8_Nov', 'S2_B8_Dec', 
+             'S2_B8A_Jan', 'S2_B8A_Feb', 'S2_B8A_Mar', 'S2_B8A_Apr', 'S2_B8A_May', 'S2_B8A_Jun', 'S2_B8A_Jul', 'S2_B8A_Aug', 'S2_B8A_Sep', 'S2_B8A_Oct', 'S2_B8A_Nov', 'S2_B8A_Dec',  
+             'S2_B11_Jan', 'S2_B11_Feb', 'S2_B11_Mar', 'S2_B11_Apr', 'S2_B11_May', 'S2_B11_Jun', 'S2_B11_Jul', 'S2_B11_Aug', 'S2_B11_Sep', 'S2_B11_Oct', 'S2_B11_Nov', 'S2_B11_Dec',
+             'S2_B12_Jan', 'S2_B12_Feb', 'S2_B12_Mar', 'S2_B12_Apr', 'S2_B12_May', 'S2_B12_Jun', 'S2_B12_Jul', 'S2_B12_Aug', 'S2_B12_Sep', 'S2_B12_Oct', 'S2_B12_Nov', 'S2_B12_Dec', 
+             'S2_CIgreen_Jan', 'S2_CIgreen_Feb', 'S2_CIgreen_Mar', 'S2_CIgreen_Apr', 'S2_CIgreen_May', 'S2_CIgreen_Jun', 'S2_CIgreen_Jul', 'S2_CIgreen_Aug', 'S2_CIgreen_Sep', 'S2_CIgreen_Oct', 'S2_CIgreen_Nov', 'S2_CIgreen_Dec', 
+             'S2_CIre_Jan', 'S2_CIre_Feb', 'S2_CIre_Mar', 'S2_CIre_Apr', 'S2_CIre_May', 'S2_CIre_Jun', 'S2_CIre_Jul', 'S2_CIre_Aug', 'S2_CIre_Sep', 'S2_CIre_Oct', 'S2_CIre_Nov', 'S2_CIre_Dec', 
+             'S2_DVI_Jan', 'S2_DVI_Feb', 'S2_DVI_Mar', 'S2_DVI_Apr', 'S2_DVI_May', 'S2_DVI_Jun', 'S2_DVI_Jul', 'S2_DVI_Aug', 'S2_DVI_Sep', 'S2_DVI_Oct', 'S2_DVI_Nov', 'S2_DVI_Dec', 
+             'S2_EVI1_Jan', 'S2_EVI1_Feb', 'S2_EVI1_Mar', 'S2_EVI1_Apr', 'S2_EVI1_May', 'S2_EVI1_Jun', 'S2_EVI1_Jul', 'S2_EVI1_Aug', 'S2_EVI1_Sep', 'S2_EVI1_Oct', 'S2_EVI1_Nov', 'S2_EVI1_Dec', 
+             'S2_EVI2_Jan', 'S2_EVI2_Feb', 'S2_EVI2_Mar', 'S2_EVI2_Apr', 'S2_EVI2_May', 'S2_EVI2_Jun', 'S2_EVI2_Jul', 'S2_EVI2_Aug', 'S2_EVI2_Sep', 'S2_EVI2_Oct', 'S2_EVI2_Nov', 'S2_EVI2_Dec', 
+             'S2_EVIre1_Jan', 'S2_EVIre1_Feb', 'S2_EVIre1_Mar', 'S2_EVIre1_Apr', 'S2_EVIre1_May', 'S2_EVIre1_Jun', 'S2_EVIre1_Jul', 'S2_EVIre1_Aug', 'S2_EVIre1_Sep', 'S2_EVIre1_Oct', 'S2_EVIre1_Nov', 'S2_EVIre1_Dec', 
+             'S2_EVIre2_Jan', 'S2_EVIre2_Feb', 'S2_EVIre2_Mar', 'S2_EVIre2_Apr', 'S2_EVIre2_May', 'S2_EVIre2_Jun', 'S2_EVIre2_Jul', 'S2_EVIre2_Aug', 'S2_EVIre2_Sep', 'S2_EVIre2_Oct', 'S2_EVIre2_Nov', 'S2_EVIre2_Dec', 
+             'S2_EVIre3_Jan', 'S2_EVIre3_Feb', 'S2_EVIre3_Mar', 'S2_EVIre3_Apr', 'S2_EVIre3_May', 'S2_EVIre3_Jun', 'S2_EVIre3_Jul', 'S2_EVIre3_Aug', 'S2_EVIre3_Sep', 'S2_EVIre3_Oct', 'S2_EVIre3_Nov', 'S2_EVIre3_Dec', 
+             'S2_GNDVI_Jan', 'S2_GNDVI_Feb', 'S2_GNDVI_Mar', 'S2_GNDVI_Apr', 'S2_GNDVI_May', 'S2_GNDVI_Jun', 'S2_GNDVI_Jul', 'S2_GNDVI_Aug', 'S2_GNDVI_Sep', 'S2_GNDVI_Oct', 'S2_GNDVI_Nov', 'S2_GNDVI_Dec', 
+             'S2_IRECI_Jan', 'S2_IRECI_Feb', 'S2_IRECI_Mar', 'S2_IRECI_Apr', 'S2_IRECI_May', 'S2_IRECI_Jun', 'S2_IRECI_Jul', 'S2_IRECI_Aug', 'S2_IRECI_Sep', 'S2_IRECI_Oct', 'S2_IRECI_Nov', 'S2_IRECI_Dec',
+             'S2_MCARI1_Jan', 'S2_MCARI1_Feb', 'S2_MCARI1_Mar', 'S2_MCARI1_Apr', 'S2_MCARI1_May', 'S2_MCARI1_Jun', 'S2_MCARI1_Jul', 'S2_MCARI1_Aug', 'S2_MCARI1_Sep', 'S2_MCARI1_Oct', 'S2_MCARI1_Nov', 'S2_MCARI1_Dec', 
+             'S2_MCARI2_Jan', 'S2_MCARI2_Feb', 'S2_MCARI2_Mar', 'S2_MCARI2_Apr', 'S2_MCARI2_May', 'S2_MCARI2_Jun', 'S2_MCARI2_Jul', 'S2_MCARI2_Aug', 'S2_MCARI2_Sep', 'S2_MCARI2_Oct', 'S2_MCARI2_Nov', 'S2_MCARI2_Dec', 
+             'S2_MCARI3_Jan', 'S2_MCARI3_Feb', 'S2_MCARI3_Mar', 'S2_MCARI3_Apr', 'S2_MCARI3_May', 'S2_MCARI3_Jun', 'S2_MCARI3_Jul', 'S2_MCARI3_Aug', 'S2_MCARI3_Sep', 'S2_MCARI3_Oct', 'S2_MCARI3_Nov', 'S2_MCARI3_Dec', 
+             'S2_MTCI1_Jan', 'S2_MTCI1_Feb', 'S2_MTCI1_Mar', 'S2_MTCI1_Apr', 'S2_MTCI1_May', 'S2_MTCI1_Jun', 'S2_MTCI1_Jul', 'S2_MTCI1_Aug', 'S2_MTCI1_Sep', 'S2_MTCI1_Oct', 'S2_MTCI1_Nov', 'S2_MTCI1_Dec', 
+             'S2_MTCI2_Jan', 'S2_MTCI2_Feb', 'S2_MTCI2_Mar', 'S2_MTCI2_Apr', 'S2_MTCI2_May', 'S2_MTCI2_Jun', 'S2_MTCI2_Jul', 'S2_MTCI2_Aug', 'S2_MTCI2_Sep', 'S2_MTCI2_Oct', 'S2_MTCI2_Nov', 'S2_MTCI2_Dec', 
+             'S2_MTCI3_Jan', 'S2_MTCI3_Feb', 'S2_MTCI3_Mar', 'S2_MTCI3_Apr', 'S2_MTCI3_May', 'S2_MTCI3_Jun', 'S2_MTCI3_Jul', 'S2_MTCI3_Aug', 'S2_MTCI3_Sep', 'S2_MTCI3_Oct', 'S2_MTCI3_Nov', 'S2_MTCI3_Dec', 
+             'S2_NDI45_Jan', 'S2_NDI45_Feb', 'S2_NDI45_Mar', 'S2_NDI45_Apr', 'S2_NDI45_May', 'S2_NDI45_Jun', 'S2_NDI45_Jul', 'S2_NDI45_Aug', 'S2_NDI45_Sep', 'S2_NDI45_Oct', 'S2_NDI45_Nov', 'S2_NDI45_Dec', 
+             'S2_NDRE1_Jan', 'S2_NDRE1_Feb', 'S2_NDRE1_Mar', 'S2_NDRE1_Apr', 'S2_NDRE1_May', 'S2_NDRE1_Jun', 'S2_NDRE1_Jul', 'S2_NDRE1_Aug', 'S2_NDRE1_Sep', 'S2_NDRE1_Oct', 'S2_NDRE1_Nov', 'S2_NDRE1_Dec',
+             'S2_NDRE2_Jan', 'S2_NDRE2_Feb', 'S2_NDRE2_Mar', 'S2_NDRE2_Apr', 'S2_NDRE2_May', 'S2_NDRE2_Jun', 'S2_NDRE2_Jul', 'S2_NDRE2_Aug', 'S2_NDRE2_Sep', 'S2_NDRE2_Oct', 'S2_NDRE2_Nov', 'S2_NDRE2_Dec', 
+             'S2_NDRE3_Jan', 'S2_NDRE3_Feb', 'S2_NDRE3_Mar', 'S2_NDRE3_Apr', 'S2_NDRE3_May', 'S2_NDRE3_Jun', 'S2_NDRE3_Jul', 'S2_NDRE3_Aug', 'S2_NDRE3_Sep', 'S2_NDRE3_Oct', 'S2_NDRE3_Nov', 'S2_NDRE3_Dec',
+             'S2_NDVI56_Jan', 'S2_NDVI56_Feb', 'S2_NDVI56_Mar', 'S2_NDVI56_Apr', 'S2_NDVI56_May', 'S2_NDVI56_Jun', 'S2_NDVI56_Jul', 'S2_NDVI56_Aug', 'S2_NDVI56_Sep', 'S2_NDVI56_Oct', 'S2_NDVI56_Nov', 'S2_NDVI56_Dec', 
+             'S2_NDVI57_Jan', 'S2_NDVI57_Feb', 'S2_NDVI57_Mar', 'S2_NDVI57_Apr', 'S2_NDVI57_May', 'S2_NDVI57_Jun', 'S2_NDVI57_Jul', 'S2_NDVI57_Aug', 'S2_NDVI57_Sep', 'S2_NDVI57_Oct', 'S2_NDVI57_Nov', 'S2_NDVI57_Dec', 
+             'S2_NDVI68a_Jan', 'S2_NDVI68a_Feb', 'S2_NDVI68a_Mar', 'S2_NDVI68a_Apr', 'S2_NDVI68a_May', 'S2_NDVI68a_Jun', 'S2_NDVI68a_Jul', 'S2_NDVI68a_Aug', 'S2_NDVI68a_Sep', 'S2_NDVI68a_Oct', 'S2_NDVI68a_Nov', 'S2_NDVI68a_Dec',
+             'S2_NDVI78a_Jan', 'S2_NDVI78a_Feb', 'S2_NDVI78a_Mar', 'S2_NDVI78a_Apr', 'S2_NDVI78a_May', 'S2_NDVI78a_Jun', 'S2_NDVI78a_Jul', 'S2_NDVI78a_Aug', 'S2_NDVI78a_Sep', 'S2_NDVI78a_Oct', 'S2_NDVI78a_Nov', 'S2_NDVI78a_Dec', 
+             'S2_NDWI1_Jan', 'S2_NDWI1_Feb', 'S2_NDWI1_Mar', 'S2_NDWI1_Apr', 'S2_NDWI1_May', 'S2_NDWI1_Jun', 'S2_NDWI1_Jul', 'S2_NDWI1_Aug', 'S2_NDWI1_Sep', 'S2_NDWI1_Oct', 'S2_NDWI1_Nov', 'S2_NDWI1_Dec', 
+             'S2_NDWI2_Jan', 'S2_NDWI2_Feb', 'S2_NDWI2_Mar', 'S2_NDWI2_Apr', 'S2_NDWI2_May', 'S2_NDWI2_Jun', 'S2_NDWI2_Jul', 'S2_NDWI2_Aug', 'S2_NDWI2_Sep', 'S2_NDWI2_Oct', 'S2_NDWI2_Nov', 'S2_NDWI2_Dec',
+             'S2_NIRv_Jan', 'S2_NIRv_Feb', 'S2_NIRv_Mar', 'S2_NIRv_Apr', 'S2_NIRv_May', 'S2_NIRv_Jun', 'S2_NIRv_Jul', 'S2_NIRv_Aug', 'S2_NIRv_Sep', 'S2_NIRv_Oct', 'S2_NIRv_Nov', 'S2_NIRv_Dec',
+             'S2_NLI_Jan', 'S2_NLI_Feb', 'S2_NLI_Mar', 'S2_NLI_Apr', 'S2_NLI_May', 'S2_NLI_Jun', 'S2_NLI_Jul', 'S2_NLI_Aug', 'S2_NLI_Sep', 'S2_NLI_Oct', 'S2_NLI_Nov', 'S2_NLI_Dec', 
+             'S2_OSAVI_Jan', 'S2_OSAVI_Feb', 'S2_OSAVI_Mar', 'S2_OSAVI_Apr', 'S2_OSAVI_May', 'S2_OSAVI_Jun', 'S2_OSAVI_Jul', 'S2_OSAVI_Aug', 'S2_OSAVI_Sep', 'S2_OSAVI_Oct', 'S2_OSAVI_Nov', 'S2_OSAVI_Dec', 
+             'S2_PSSRa_Jan', 'S2_PSSRa_Feb', 'S2_PSSRa_Mar', 'S2_PSSRa_Apr', 'S2_PSSRa_May', 'S2_PSSRa_Jun', 'S2_PSSRa_Jul', 'S2_PSSRa_Aug', 'S2_PSSRa_Sep', 'S2_PSSRa_Oct', 'S2_PSSRa_Nov', 'S2_PSSRa_Dec',
+             'S2_SAVI_Jan', 'S2_SAVI_Feb', 'S2_SAVI_Mar', 'S2_SAVI_Apr', 'S2_SAVI_May', 'S2_SAVI_Jun', 'S2_SAVI_Jul', 'S2_SAVI_Aug', 'S2_SAVI_Sep', 'S2_SAVI_Oct', 'S2_SAVI_Nov', 'S2_SAVI_Dec',
+             'S2_SR_Jan', 'S2_SR_Feb', 'S2_SR_Mar', 'S2_SR_Apr', 'S2_SR_May', 'S2_SR_Jun', 'S2_SR_Jul', 'S2_SR_Aug', 'S2_SR_Sep', 'S2_SR_Oct', 'S2_SR_Nov', 'S2_SR_Dec',
+             'S2_kNDVI_Jan', 'S2_kNDVI_Feb', 'S2_kNDVI_Mar', 'S2_kNDVI_Apr', 'S2_kNDVI_May', 'S2_kNDVI_Jun', 'S2_kNDVI_Jul', 'S2_kNDVI_Aug', 'S2_kNDVI_Sep', 'S2_kNDVI_Oct', 'S2_kNDVI_Nov', 'S2_kNDVI_Dec',
+             
+             'P2_HH+HV_Jan', 'P2_HH+HV_Feb', 'P2_HH+HV_Mar', 'P2_HH+HV_Apr', 'P2_HH+HV_May', 'P2_HH+HV_Jun', 'P2_HH+HV_Jul', 'P2_HH+HV_Aug', 'P2_HH+HV_Sep', 'P2_HH+HV_Oct', 'P2_HH+HV_Nov', 'P2_HH+HV_Dec',
+             'P2_HH-HV_Jan', 'P2_HH-HV_Feb', 'P2_HH-HV_Mar', 'P2_HH-HV_Apr', 'P2_HH-HV_May', 'P2_HH-HV_Jun', 'P2_HH-HV_Jul', 'P2_HH-HV_Aug', 'P2_HH-HV_Sep', 'P2_HH-HV_Oct', 'P2_HH-HV_Nov', 'P2_HH-HV_Dec',
+             'P2_HH_Jan', 'P2_HH_Feb', 'P2_HH_Mar', 'P2_HH_Apr', 'P2_HH_May', 'P2_HH_Jun', 'P2_HH_Jul', 'P2_HH_Aug', 'P2_HH_Sep', 'P2_HH_Oct', 'P2_HH_Nov', 'P2_HH_Dec', 
+             'P2_HH_asm_Jan', 'P2_HH_asm_Feb', 'P2_HH_asm_Mar', 'P2_HH_asm_Apr', 'P2_HH_asm_May', 'P2_HH_asm_Jun', 'P2_HH_asm_Jul', 'P2_HH_asm_Aug', 'P2_HH_asm_Sep', 'P2_HH_asm_Oct', 'P2_HH_asm_Nov', 'P2_HH_asm_Dec', 
+             'P2_HH_con_Jan', 'P2_HH_con_Feb', 'P2_HH_con_Mar', 'P2_HH_con_Apr', 'P2_HH_con_May', 'P2_HH_con_Jun', 'P2_HH_con_Jul', 'P2_HH_con_Aug', 'P2_HH_con_Sep', 'P2_HH_con_Oct', 'P2_HH_con_Nov', 'P2_HH_con_Dec',
+             'P2_HH_corr_Jan', 'P2_HH_corr_Feb', 'P2_HH_corr_Mar', 'P2_HH_corr_Apr', 'P2_HH_corr_May', 'P2_HH_corr_Jun', 'P2_HH_corr_Jul', 'P2_HH_corr_Aug', 'P2_HH_corr_Sep', 'P2_HH_corr_Oct', 'P2_HH_corr_Nov', 'P2_HH_corr_Dec',
+             'P2_HH_dent_Jan', 'P2_HH_dent_Feb', 'P2_HH_dent_Mar', 'P2_HH_dent_Apr', 'P2_HH_dent_May', 'P2_HH_dent_Jun', 'P2_HH_dent_Jul', 'P2_HH_dent_Aug', 'P2_HH_dent_Sep', 'P2_HH_dent_Oct', 'P2_HH_dent_Nov', 'P2_HH_dent_Dec', 
+             'P2_HH_diss_Jan', 'P2_HH_diss_Feb', 'P2_HH_diss_Mar', 'P2_HH_diss_Apr', 'P2_HH_diss_May', 'P2_HH_diss_Jun', 'P2_HH_diss_Jul', 'P2_HH_diss_Aug', 'P2_HH_diss_Sep', 'P2_HH_diss_Oct', 'P2_HH_diss_Nov', 'P2_HH_diss_Dec',
+             'P2_HH_dvar_Jan', 'P2_HH_dvar_Feb', 'P2_HH_dvar_Mar', 'P2_HH_dvar_Apr', 'P2_HH_dvar_May', 'P2_HH_dvar_Jun', 'P2_HH_dvar_Jul', 'P2_HH_dvar_Aug', 'P2_HH_dvar_Sep', 'P2_HH_dvar_Oct', 'P2_HH_dvar_Nov', 'P2_HH_dvar_Dec', 
+             'P2_HH_ent_Jan', 'P2_HH_ent_Feb', 'P2_HH_ent_Mar', 'P2_HH_ent_Apr', 'P2_HH_ent_May', 'P2_HH_ent_Jun', 'P2_HH_ent_Jul', 'P2_HH_ent_Aug', 'P2_HH_ent_Sep', 'P2_HH_ent_Oct', 'P2_HH_ent_Nov', 'P2_HH_ent_Dec',
+             'P2_HH_homo_Jan', 'P2_HH_homo_Feb', 'P2_HH_homo_Mar', 'P2_HH_homo_Apr', 'P2_HH_homo_May', 'P2_HH_homo_Jun', 'P2_HH_homo_Jul', 'P2_HH_homo_Aug', 'P2_HH_homo_Sep', 'P2_HH_homo_Oct', 'P2_HH_homo_Nov', 'P2_HH_homo_Dec',
+             'P2_HH_imcorr1_Jan', 'P2_HH_imcorr1_Feb', 'P2_HH_imcorr1_Mar', 'P2_HH_imcorr1_Apr', 'P2_HH_imcorr1_May', 'P2_HH_imcorr1_Jun', 'P2_HH_imcorr1_Jul', 'P2_HH_imcorr1_Aug', 'P2_HH_imcorr1_Sep', 'P2_HH_imcorr1_Oct', 'P2_HH_imcorr1_Nov', 'P2_HH_imcorr1_Dec',
+             'P2_HH_imcorr2_Jan', 'P2_HH_imcorr2_Feb', 'P2_HH_imcorr2_Mar', 'P2_HH_imcorr2_Apr', 'P2_HH_imcorr2_May', 'P2_HH_imcorr2_Jun', 'P2_HH_imcorr2_Jul', 'P2_HH_imcorr2_Aug', 'P2_HH_imcorr2_Sep', 'P2_HH_imcorr2_Oct', 'P2_HH_imcorr2_Nov', 'P2_HH_imcorr2_Dec', 
+             'P2_HH_inertia_Jan', 'P2_HH_inertia_Feb', 'P2_HH_inertia_Mar', 'P2_HH_inertia_Apr', 'P2_HH_inertia_May', 'P2_HH_inertia_Jun', 'P2_HH_inertia_Jul', 'P2_HH_inertia_Aug', 'P2_HH_inertia_Sep', 'P2_HH_inertia_Oct', 'P2_HH_inertia_Nov', 'P2_HH_inertia_Dec', 
+             'P2_HH_prom_Jan', 'P2_HH_prom_Feb', 'P2_HH_prom_Mar', 'P2_HH_prom_Apr', 'P2_HH_prom_May', 'P2_HH_prom_Jun', 'P2_HH_prom_Jul', 'P2_HH_prom_Aug', 'P2_HH_prom_Sep', 'P2_HH_prom_Oct', 'P2_HH_prom_Nov', 'P2_HH_prom_Dec', 
+             'P2_HH_savg_Jan', 'P2_HH_savg_Feb', 'P2_HH_savg_Mar', 'P2_HH_savg_Apr', 'P2_HH_savg_May', 'P2_HH_savg_Jun', 'P2_HH_savg_Jul', 'P2_HH_savg_Aug', 'P2_HH_savg_Sep', 'P2_HH_savg_Oct', 'P2_HH_savg_Nov', 'P2_HH_savg_Dec',
+             'P2_HH_sent_Jan', 'P2_HH_sent_Feb', 'P2_HH_sent_Mar', 'P2_HH_sent_Apr', 'P2_HH_sent_May', 'P2_HH_sent_Jun', 'P2_HH_sent_Jul', 'P2_HH_sent_Aug', 'P2_HH_sent_Sep', 'P2_HH_sent_Oct', 'P2_HH_sent_Nov', 'P2_HH_sent_Dec',
+             'P2_HH_shade_Jan', 'P2_HH_shade_Feb', 'P2_HH_shade_Mar', 'P2_HH_shade_Apr', 'P2_HH_shade_May', 'P2_HH_shade_Jun', 'P2_HH_shade_Jul', 'P2_HH_shade_Aug', 'P2_HH_shade_Sep', 'P2_HH_shade_Oct', 'P2_HH_shade_Nov', 'P2_HH_shade_Dec',
+             'P2_HH_svar_Jan', 'P2_HH_svar_Feb', 'P2_HH_svar_Mar', 'P2_HH_svar_Apr', 'P2_HH_svar_May', 'P2_HH_svar_Jun', 'P2_HH_svar_Jul', 'P2_HH_svar_Aug', 'P2_HH_svar_Sep', 'P2_HH_svar_Oct', 'P2_HH_svar_Nov', 'P2_HH_svar_Dec', 
+             'P2_HH_var_Jan', 'P2_HH_var_Feb', 'P2_HH_var_Mar', 'P2_HH_var_Apr', 'P2_HH_var_May', 'P2_HH_var_Jun', 'P2_HH_var_Jul', 'P2_HH_var_Aug', 'P2_HH_var_Sep', 'P2_HH_var_Oct', 'P2_HH_var_Nov', 'P2_HH_var_Dec', 
+             'P2_HV/HH_Jan', 'P2_HV/HH_Feb', 'P2_HV/HH_Mar', 'P2_HV/HH_Apr', 'P2_HV/HH_May', 'P2_HV/HH_Jun', 'P2_HV/HH_Jul', 'P2_HV/HH_Aug', 'P2_HV/HH_Sep', 'P2_HV/HH_Oct', 'P2_HV/HH_Nov', 'P2_HV/HH_Dec', 
+             'P2_HV_Jan', 'P2_HV_Feb', 'P2_HV_Mar', 'P2_HV_Apr', 'P2_HV_May', 'P2_HV_Jun', 'P2_HV_Jul', 'P2_HV_Aug', 'P2_HV_Sep', 'P2_HV_Oct', 'P2_HV_Nov', 'P2_HV_Dec', 
+             'P2_HV_asm_Jan', 'P2_HV_asm_Feb', 'P2_HV_asm_Mar', 'P2_HV_asm_Apr', 'P2_HV_asm_May', 'P2_HV_asm_Jun', 'P2_HV_asm_Jul', 'P2_HV_asm_Aug', 'P2_HV_asm_Sep', 'P2_HV_asm_Oct', 'P2_HV_asm_Nov', 'P2_HV_asm_Dec', 
+             'P2_HV_con_Jan', 'P2_HV_con_Feb', 'P2_HV_con_Mar', 'P2_HV_con_Apr', 'P2_HV_con_May', 'P2_HV_con_Jun', 'P2_HV_con_Jul', 'P2_HV_con_Aug', 'P2_HV_con_Sep', 'P2_HV_con_Oct', 'P2_HV_con_Nov', 'P2_HV_con_Dec', 
+             'P2_HV_corr_Jan', 'P2_HV_corr_Feb', 'P2_HV_corr_Mar', 'P2_HV_corr_Apr', 'P2_HV_corr_May', 'P2_HV_corr_Jun', 'P2_HV_corr_Jul', 'P2_HV_corr_Aug', 'P2_HV_corr_Sep', 'P2_HV_corr_Oct', 'P2_HV_corr_Nov', 'P2_HV_corr_Dec', 
+             'P2_HV_dent_Jan', 'P2_HV_dent_Feb', 'P2_HV_dent_Mar', 'P2_HV_dent_Apr', 'P2_HV_dent_May', 'P2_HV_dent_Jun', 'P2_HV_dent_Jul', 'P2_HV_dent_Aug', 'P2_HV_dent_Sep', 'P2_HV_dent_Oct', 'P2_HV_dent_Nov', 'P2_HV_dent_Dec', 
+             'P2_HV_diss_Jan', 'P2_HV_diss_Feb', 'P2_HV_diss_Mar', 'P2_HV_diss_Apr', 'P2_HV_diss_May', 'P2_HV_diss_Jun', 'P2_HV_diss_Jul', 'P2_HV_diss_Aug', 'P2_HV_diss_Sep', 'P2_HV_diss_Oct', 'P2_HV_diss_Nov', 'P2_HV_diss_Dec',
+             'P2_HV_dvar_Jan', 'P2_HV_dvar_Feb', 'P2_HV_dvar_Mar', 'P2_HV_dvar_Apr', 'P2_HV_dvar_May', 'P2_HV_dvar_Jun', 'P2_HV_dvar_Jul', 'P2_HV_dvar_Aug', 'P2_HV_dvar_Sep', 'P2_HV_dvar_Oct', 'P2_HV_dvar_Nov', 'P2_HV_dvar_Dec',
+             'P2_HV_ent_Jan', 'P2_HV_ent_Feb', 'P2_HV_ent_Mar', 'P2_HV_ent_Apr', 'P2_HV_ent_May', 'P2_HV_ent_Jun', 'P2_HV_ent_Jul', 'P2_HV_ent_Aug', 'P2_HV_ent_Sep', 'P2_HV_ent_Oct', 'P2_HV_ent_Nov', 'P2_HV_ent_Dec', 
+             'P2_HV_homo_Jan', 'P2_HV_homo_Feb', 'P2_HV_homo_Mar', 'P2_HV_homo_Apr', 'P2_HV_homo_May', 'P2_HV_homo_Jun', 'P2_HV_homo_Jul', 'P2_HV_homo_Aug', 'P2_HV_homo_Sep', 'P2_HV_homo_Oct', 'P2_HV_homo_Nov', 'P2_HV_homo_Dec',
+             'P2_HV_imcorr1_Jan', 'P2_HV_imcorr1_Feb', 'P2_HV_imcorr1_Mar', 'P2_HV_imcorr1_Apr', 'P2_HV_imcorr1_May', 'P2_HV_imcorr1_Jun', 'P2_HV_imcorr1_Jul', 'P2_HV_imcorr1_Aug', 'P2_HV_imcorr1_Sep', 'P2_HV_imcorr1_Oct', 'P2_HV_imcorr1_Nov', 'P2_HV_imcorr1_Dec', 
+             'P2_HV_imcorr2_Jan', 'P2_HV_imcorr2_Feb', 'P2_HV_imcorr2_Mar', 'P2_HV_imcorr2_Apr', 'P2_HV_imcorr2_May', 'P2_HV_imcorr2_Jun', 'P2_HV_imcorr2_Jul', 'P2_HV_imcorr2_Aug', 'P2_HV_imcorr2_Sep', 'P2_HV_imcorr2_Oct', 'P2_HV_imcorr2_Nov', 'P2_HV_imcorr2_Dec', 
+             'P2_HV_inertia_Jan', 'P2_HV_inertia_Feb', 'P2_HV_inertia_Mar', 'P2_HV_inertia_Apr', 'P2_HV_inertia_May', 'P2_HV_inertia_Jun', 'P2_HV_inertia_Jul', 'P2_HV_inertia_Aug', 'P2_HV_inertia_Sep', 'P2_HV_inertia_Oct', 'P2_HV_inertia_Nov', 'P2_HV_inertia_Dec',
+             'P2_HV_prom_Jan', 'P2_HV_prom_Feb', 'P2_HV_prom_Mar', 'P2_HV_prom_Apr', 'P2_HV_prom_May', 'P2_HV_prom_Jun', 'P2_HV_prom_Jul', 'P2_HV_prom_Aug', 'P2_HV_prom_Sep', 'P2_HV_prom_Oct', 'P2_HV_prom_Nov', 'P2_HV_prom_Dec', 
+             'P2_HV_savg_Jan', 'P2_HV_savg_Feb', 'P2_HV_savg_Mar', 'P2_HV_savg_Apr', 'P2_HV_savg_May', 'P2_HV_savg_Jun', 'P2_HV_savg_Jul', 'P2_HV_savg_Aug', 'P2_HV_savg_Sep', 'P2_HV_savg_Oct', 'P2_HV_savg_Nov', 'P2_HV_savg_Dec', 
+             'P2_HV_sent_Jan', 'P2_HV_sent_Feb', 'P2_HV_sent_Mar', 'P2_HV_sent_Apr', 'P2_HV_sent_May', 'P2_HV_sent_Jun', 'P2_HV_sent_Jul', 'P2_HV_sent_Aug', 'P2_HV_sent_Sep', 'P2_HV_sent_Oct', 'P2_HV_sent_Nov', 'P2_HV_sent_Dec', 
+             'P2_HV_shade_Jan', 'P2_HV_shade_Feb', 'P2_HV_shade_Mar', 'P2_HV_shade_Apr', 'P2_HV_shade_May', 'P2_HV_shade_Jun', 'P2_HV_shade_Jul', 'P2_HV_shade_Aug', 'P2_HV_shade_Sep', 'P2_HV_shade_Oct', 'P2_HV_shade_Nov', 'P2_HV_shade_Dec', 
+             'P2_HV_svar_Jan', 'P2_HV_svar_Feb', 'P2_HV_svar_Mar', 'P2_HV_svar_Apr', 'P2_HV_svar_May', 'P2_HV_svar_Jun', 'P2_HV_svar_Jul', 'P2_HV_svar_Aug', 'P2_HV_svar_Sep', 'P2_HV_svar_Oct', 'P2_HV_svar_Nov', 'P2_HV_svar_Dec',
+             'P2_HV_var_Jan', 'P2_HV_var_Feb', 'P2_HV_var_Mar', 'P2_HV_var_Apr', 'P2_HV_var_May', 'P2_HV_var_Jun', 'P2_HV_var_Jul', 'P2_HV_var_Aug', 'P2_HV_var_Sep', 'P2_HV_var_Oct', 'P2_HV_var_Nov', 'P2_HV_var_Dec'
+           ]
+
     # load data: train, val and test
     for dataset in['training', 'validation', 'test']:
         if dataset == 'training':
-            train_path = "../data/train_month_median.csv"  
+            train_path = "../data/train_month_median_pivot.csv"  
             
             X_train, y_train = prepare_df(train_path, cols, dataset, directory, cover_type=None)
             plot_target_histograms(y_train, dataset, directory)
-            X_train_scaled, y_train_scaled,  feature_scaler, target_scaler = standard_df(X_train, y_train,  directory)
-            X_3d_scaled, y_2d_scaled = prepare_seq(X_train_scaled, y_train_scaled, timestamp=12)            
-            # print(f"\nSample of first sequence (X_3d_scaled):")
-            # print(X_3d_scaled[0])   
-            
+            X_train_scaled, y_train_scaled,  feature_scaler, target_scaler = standard_df(X_train, y_train, directory)
+            # display(X_train_scaled[:1])
+            # display(y_train_scaled[:1])
             # split cover
             X_train_Croplands, y_train_Croplands = prepare_df(train_path, cols, dataset, directory, cover_type="Croplands")
             X_train_Croplands_scaled = feature_scaler.transform(X_train_Croplands)
             y_train_Croplands_scaled = target_scaler.transform(y_train_Croplands.values.reshape(-1, 1))
-            X_3d_Croplands_scaled, y_2d_Croplands_scaled = prepare_seq(X_train_Croplands_scaled, y_train_Croplands_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_Croplands_scaled):")
-            # print(X_3d_Croplands_scaled[0])    
             
             X_train_Forests, y_train_Forests = prepare_df(train_path, cols, dataset, directory, cover_type="Forests")
             X_train_Forests_scaled = feature_scaler.transform(X_train_Forests)
             y_train_Forests_scaled = target_scaler.transform(y_train_Forests.values.reshape(-1, 1))
-            X_3d_Forests_scaled, y_2d_Forests_scaled = prepare_seq(X_train_Forests_scaled, y_train_Forests_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_Forests_scaled):")
-            # print(X_3d_Forests_scaled[0]) 
             
             X_train_Savannas, y_train_Savannas= prepare_df(train_path, cols, dataset, directory, cover_type="Savannas")
             X_train_Savannas_scaled = feature_scaler.transform(X_train_Savannas)
             y_train_Savannas_scaled = target_scaler.transform(y_train_Savannas.values.reshape(-1, 1))
-            X_3d_Savannas_scaled, y_2d_Savannas_scaled = prepare_seq(X_train_Savannas_scaled, y_train_Savannas_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_Savannas_scaled):")
-            # print(X_3d_Savannas_scaled[0]) 
             
             X_train_Shrub_grass_lands, y_train_Shrub_grass_lands = prepare_df(train_path, cols, dataset, directory, cover_type="Shrub_grass_lands")
             X_train_Shrub_grass_lands_scaled = feature_scaler.transform(X_train_Shrub_grass_lands)
             y_train_Shrub_grass_lands_scaled = target_scaler.transform(y_train_Shrub_grass_lands.values.reshape(-1, 1))
-            X_3d_Shrub_grass_lands_scaled, y_2d_Shrub_grass_lands_scaled = prepare_seq(X_train_Shrub_grass_lands_scaled, y_train_Shrub_grass_lands_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_Shrub_grass_lands_scaled):")
-            # print(X_3d_Shrub_grass_lands_scaled[0])             
+            
        
         elif dataset == "validation":
-            val_path ="../data/val_month_median.csv" 
+            val_path ="../data/val_month_median_pivot.csv" 
             X_val, y_val = prepare_df(val_path, cols, dataset, directory, cover_type=None)
             plot_target_histograms(y_val, dataset, directory)
             X_val_scaled = feature_scaler.transform(X_val)
             y_val_scaled = target_scaler.transform(y_val.values.reshape(-1, 1))
-            X_3d_val_scaled, y_2d_val_scaled = prepare_seq(X_val_scaled, y_val_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_val_scaled):")
-            # print(X_3d_val_scaled[0])
-            
             
         else:
-            test_path = "../data/test_month_median.csv"  
+            test_path = "../data/test_month_median_pivot.csv" 
             
             X_test, y_test = prepare_df(test_path, cols, dataset, directory, cover_type=None)
             plot_target_histograms(y_test, dataset, directory)
             X_test_scaled = feature_scaler.transform(X_test)
             y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1))
-            X_3d_test_scaled, y_2d_test_scaled = prepare_seq(X_test_scaled, y_test_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_test_scaled):")
-            # print(X_3d_test_scaled[0])
-            
             # split cover
             X_test_Croplands, y_test_Croplands = prepare_df(test_path, cols, dataset, directory, cover_type="Croplands")
             X_test_Croplands_scaled = feature_scaler.transform(X_test_Croplands)
             y_test_Croplands_scaled = target_scaler.transform(y_test_Croplands.values.reshape(-1, 1))
-            X_3d_Croplands_scaled, y_2d_Croplands_scaled = prepare_seq(X_test_Croplands_scaled, y_test_Croplands_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_Croplands_scaled):")
-            # print(X_3d_Croplands_scaled[0])            
             
             X_test_Forests, y_test_Forests = prepare_df(test_path, cols, dataset, directory, cover_type="Forests")
             X_test_Forests_scaled = feature_scaler.transform(X_test_Forests)
             y_test_Forests_scaled = target_scaler.transform(y_test_Forests.values.reshape(-1, 1))
-            X_3d_Forests_scaled, y_2d_Forests_scaled = prepare_seq(X_test_Forests_scaled, y_test_Forests_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_Forests_scaled):")
-            # print(X_3d_Forests_scaled[0])            
             
             X_test_Savannas, y_test_Savannas= prepare_df(test_path, cols, dataset, directory, cover_type="Savannas")
             X_test_Savannas_scaled = feature_scaler.transform(X_test_Savannas)
             y_test_Savannas_scaled = target_scaler.transform(y_test_Savannas.values.reshape(-1, 1))
-            X_3d_Savannas_scaled, y_2d_Savannas_scaled = prepare_seq(X_test_Savannas_scaled, y_test_Savannas_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_Savannas_scaled):")
-            # print(X_3d_Savannas_scaled[0])            
-            
             
             X_test_Shrub_grass_lands, y_test_Shrub_grass_lands = prepare_df(test_path, cols, dataset, directory, cover_type="Shrub_grass_lands")
             X_test_Shrub_grass_lands_scaled = feature_scaler.transform(X_test_Shrub_grass_lands)
-            y_test_Shrub_grass_lands_scaled = target_scaler.transform(y_test_Shrub_grass_lands.values.reshape(-1, 1))  
-            X_3d_Shrub_grass_lands_scaled, y_2d_Shrub_grass_lands_scaled= prepare_seq(X_test_Shrub_grass_lands_scaled, y_test_Shrub_grass_lands_scaled, timestamp=12)
-            # print(f"\nSample of first sequence (X_3d_Shrub_grass_lands_scaled):")
-            # print(X_3d_Shrub_grass_lands_scaled[0])          
+            y_test_Shrub_grass_lands_scaled = target_scaler.transform(y_test_Shrub_grass_lands.values.reshape(-1, 1))    
             
-            
-    print(f"\n⚡X_train.head(1): \n{X_train.head(1)}")   
+    print(f"\n⚡X_train.head(1): \n{X_train.head(1)}")
 
+    
     # --- Configuration (Non-tunable) ---
     INPUT_SIZE = len(cols) # Number of input features
-    OUTPUT_SIZE = 1  # Number of output neurons 
+    OUTPUT_SIZE = 1 # Number of output neurons 
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🔋 Model was trained via {DEVICE}")
-
-    # to tensor
-    train_tensor = prepare_tensor(X_3d_scaled, y_2d_scaled)
+    
+    # train_scaled to tensor
+    train_tensor = prepare_tensor(X_train_scaled, y_train_scaled)
     X_train_tensor, y_train_tensor = train_tensor.tensors  # tensors is a tuple (X, y)
     print("\n⚡X_train_tensor shape:", X_train_tensor.shape)
     print(f'X_train_tensor[:1]: \n{X_train_tensor[:1]}')
-    train_tensor_Croplands = prepare_tensor(X_3d_Croplands_scaled, y_2d_Croplands_scaled)
-    train_tensor_Forests = prepare_tensor(X_3d_Forests_scaled, y_2d_Forests_scaled)
-    train_tensor_Savannas = prepare_tensor(X_3d_Savannas_scaled, y_2d_Savannas_scaled)
-    train_tensor_Shrub_grass_lands = prepare_tensor(X_3d_Shrub_grass_lands_scaled, y_2d_Shrub_grass_lands_scaled)
+    
+    train_tensor_Croplands = prepare_tensor(X_train_Croplands_scaled, y_train_Croplands_scaled)
+    train_tensor_Forests = prepare_tensor(X_train_Forests_scaled, y_train_Forests_scaled)
+    train_tensor_Savannas = prepare_tensor(X_train_Savannas_scaled, y_train_Savannas_scaled)
+    train_tensor_Shrub_grass_lands = prepare_tensor(X_train_Shrub_grass_lands_scaled, y_train_Shrub_grass_lands_scaled)
     
     # val_scaled to tensor        
-    val_tensor = prepare_tensor(X_3d_val_scaled, y_2d_val_scaled)
+    val_tensor = prepare_tensor(X_val_scaled, y_val_scaled)
     
     # test_scaled to tensor  
-    test_tensor = prepare_tensor(X_3d_test_scaled, y_2d_test_scaled)
-    test_tensor_Croplands = prepare_tensor(X_3d_Croplands_scaled, y_2d_Croplands_scaled)
-    test_tensor_Forests = prepare_tensor(X_3d_Forests_scaled, y_2d_Forests_scaled)
-    test_tensor_Savannas = prepare_tensor(X_3d_Savannas_scaled, y_2d_Savannas_scaled)
-    test_tensor_Shrub_grass_lands = prepare_tensor(X_3d_Shrub_grass_lands_scaled, y_2d_Shrub_grass_lands_scaled)
+    test_tensor = prepare_tensor(X_test_scaled, y_test_scaled)
+    test_tensor_Croplands = prepare_tensor(X_test_Croplands_scaled, y_test_Croplands_scaled)
+    test_tensor_Forests = prepare_tensor(X_test_Forests_scaled, y_test_Forests_scaled)
+    test_tensor_Savannas = prepare_tensor(X_test_Savannas_scaled, y_test_Savannas_scaled)
+    test_tensor_Shrub_grass_lands = prepare_tensor(X_test_Shrub_grass_lands_scaled, y_test_Shrub_grass_lands_scaled)
     # training starts
     starttime = datetime.now()
     
@@ -1372,27 +1372,27 @@ if __name__ == "__main__":
     # Set up the Optuna study using the TPESampler and 
     study = optuna.create_study(
             # sampler=optuna.samplers.RandomSampler(seed=42),
+            # pruner=optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=20),
             sampler=optuna.samplers.TPESampler(n_startup_trials=100),
-            # sampler=optuna.samplers.GPSampler(n_startup_trials=100),,
+            # sampler=optuna.samplers.GPSampler(n_startup_trials=100),
+            # pruner=optuna.pruners.NopPruner(), # Every trial will train until early stopping or EPOCHS.
             direction='minimize'
         )
     # optimization
     from functools import partial
     study.optimize(partial(objective, save_dir=directory), 
-                   n_trials=50
-                  )
-    
-    print("\nOptimization Complete.")
-    print(f"Best Value (MSE): {study.best_value:.4f}")
-    print("Best Hyperparameters:", study.best_params)
-
+                   n_trials=20,
+                   n_jobs=-1
+                  )  
     #end_time
     endtime = datetime.now()
     used_time = endtime - starttime
     
     print(f"\n--xgb training time--: {used_time }")
-
-
+    
+    print("\nOptimization Complete.")
+    print(f"Best Value (MSE): {study.best_value:.4f}")
+    print("Best Hyperparameters:", study.best_params)
     # retrain the model
     final_model = retrain(study, INPUT_SIZE, OUTPUT_SIZE, train_tensor, val_tensor, directory)
         
@@ -1426,5 +1426,5 @@ if __name__ == "__main__":
     plot_optuna_results(study, directory)
     
     # compute SHAP
-    compute_and_plot_shap(final_model, X_train_tensor, cols, timestamp=12, save_dir=directory)
-    print("\nExecution done!")        
+    compute_and_plot_shap(final_model, X_train_tensor, cols, directory)
+    print("\nExecution done!")      
