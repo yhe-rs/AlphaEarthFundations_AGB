@@ -25,5 +25,5 @@ By integrating high-dimensional foundation model features with classical geospat
 
 ### 🛠️ Tech Stack
 * **Language:** Python 3.12
-* **Frameworks:** PyTorch, Optuna, Scikit-Learn
-* **Data Sources:** Google Earth Engine, HLS, PALSAR-2.
+* **Frameworks:** PyTorch, Optuna, Scikit-Learn, XGBoost
+* **Data Sources:** Google Earth Engine: AlphaEarthFoundation, Sentinel1, Sentinel2, PALSAR-2, GLO-30 DEM
