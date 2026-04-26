@@ -27,3 +27,4 @@ By integrating high-dimensional foundation model features with classical geospat
 * **Language:** Python 3.12
 * **Frameworks:** PyTorch, Optuna, Scikit-Learn, XGBoost
 * **Data Sources:** Google Earth Engine: AlphaEarthFoundation, Sentinel1, Sentinel2, PALSAR-2, GLO-30 DEM
+<img width="1024" height="1536" alt="alphaearth" src="https://github.com/user-attachments/assets/d46ba3d0-a8fd-4e3e-9d7d-374d78a403e1" />
